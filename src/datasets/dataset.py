@@ -110,8 +110,18 @@ def create_dataloaders(
         root=os.path.join(config.data.root, "train"),
         transform=train_transform,
     )
+    # Support both 'val' and 'valid' folder names
+    val_dir = os.path.join(config.data.root, "val")
+    if not os.path.isdir(val_dir):
+        val_dir = os.path.join(config.data.root, "valid")
+    if not os.path.isdir(val_dir):
+        raise FileNotFoundError(
+            f"Validation directory not found at '{os.path.join(config.data.root, 'val')}' "
+            f"or '{os.path.join(config.data.root, 'valid')}'"
+        )
+
     val_dataset = ImageFolderDataset(
-        root=os.path.join(config.data.root, "val"),
+        root=val_dir,
         transform=val_transform,
     )
 
