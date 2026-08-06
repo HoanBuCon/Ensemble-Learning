@@ -52,13 +52,84 @@ def get_model_size_mb(save_dir: str) -> float:
     return 0.0
 
 
+def extract_model_history_info(save_dir: str) -> Dict[str, Any]:
+    """Extract best_epoch and best_val_accuracy from best_model.pth or training_history.json."""
+    import torch
+
+    best_pth = os.path.join(save_dir, "best_model.pth")
+    if os.path.exists(best_pth):
+        try:
+            ckpt = torch.load(best_pth, map_location="cpu", weights_only=False)
+            epoch = ckpt.get("epoch", 0)
+            best_val = ckpt.get("best_value", 0.0)
+            if epoch > 0 and best_val > 0.0:
+                return {
+                    "best_epoch": int(epoch),
+                    "best_val_accuracy": float(best_val),
+                }
+        except Exception:
+            pass
+
+    history_path = os.path.join(save_dir, "training_history.json")
+    best_epoch = 0
+    best_val_acc = 0.0
+
+    if os.path.exists(history_path):
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            val_accs = data.get("val_accuracy", [])
+            if val_accs:
+                best_idx = int(np.argmax(val_accs))
+                best_epoch = best_idx + 1  # 1-indexed epoch
+                best_val_acc = float(val_accs[best_idx])
+        except Exception:
+            pass
+
+    return {
+        "best_epoch": best_epoch,
+        "best_val_accuracy": best_val_acc,
+    }
+
+
+def extract_model_val_metrics(save_dir: str) -> Dict[str, float]:
+    """Compute full validation metrics (Acc, Precision, Recall, F1) from val_probabilities.npy."""
+    from src.utils.metrics import compute_metrics
+    val_prob_path = os.path.join(save_dir, "val_probabilities.npy")
+    val_label_path = os.path.join(save_dir, "val_labels.npy")
+
+    if os.path.exists(val_prob_path) and os.path.exists(val_label_path):
+        try:
+            val_probs = np.load(val_prob_path)
+            val_labels = np.load(val_label_path)
+            preds = np.argmax(val_probs, axis=1)
+            m = compute_metrics(val_labels, preds)
+            return {
+                "Val_Accuracy": m["accuracy"] * 100,
+                "Val_Precision": m["precision"] * 100,
+                "Val_Recall": m["recall"] * 100,
+                "Val_F1_Score": m["f1_score"] * 100,
+            }
+        except Exception:
+            pass
+
+    hist_info = extract_model_history_info(save_dir)
+    best_val = hist_info["best_val_accuracy"]
+    return {
+        "Val_Accuracy": best_val,
+        "Val_Precision": best_val,
+        "Val_Recall": best_val,
+        "Val_F1_Score": best_val,
+    }
+
+
 def inspect_model_status(config_path: str) -> Dict[str, Any]:
     """
     Inspect the training status of a model from its output directory.
 
     Returns:
         Dict with status ('COMPLETED', 'RESUMABLE', 'NOT_STARTED'), last_epoch,
-        total_epochs, and save_dir.
+        best_epoch, best_val_accuracy, total_epochs, and save_dir.
     """
     from src.utils.config import load_config
     import torch
@@ -69,6 +140,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
     metrics_path = os.path.join(save_dir, "metrics.json")
     last_ckpt_path = os.path.join(save_dir, "last_model.pth")
 
+    hist_info = extract_model_history_info(save_dir)
+
     if os.path.exists(metrics_path):
         return {
             "config_path": config_path,
@@ -76,6 +149,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
             "experiment_name": cfg.experiment_name,
             "status": "COMPLETED",
             "last_epoch": total_epochs,
+            "best_epoch": hist_info["best_epoch"] or total_epochs,
+            "best_val_accuracy": hist_info["best_val_accuracy"],
             "total_epochs": total_epochs,
             "save_dir": save_dir,
         }
@@ -90,6 +165,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
                 "experiment_name": cfg.experiment_name,
                 "status": "RESUMABLE",
                 "last_epoch": last_epoch,
+                "best_epoch": hist_info["best_epoch"] or last_epoch,
+                "best_val_accuracy": hist_info["best_val_accuracy"],
                 "total_epochs": total_epochs,
                 "save_dir": save_dir,
             }
@@ -102,41 +179,43 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
         "experiment_name": cfg.experiment_name,
         "status": "NOT_STARTED",
         "last_epoch": 0,
+        "best_epoch": 0,
+        "best_val_accuracy": 0.0,
         "total_epochs": total_epochs,
         "save_dir": save_dir,
     }
 
 
 def display_status_table(statuses: List[Dict[str, Any]]) -> None:
-    """Display a Rich table of model training statuses."""
+    """Print clean Rich table showing status of all experiments."""
     from rich.console import Console
     from rich.table import Table
 
     console = Console()
     table = Table(
-        title="[bold white]Experiment Status Overview[/bold white]",
-        header_style="bold cyan",
-        border_style="bright_blue",
+        title="Experiment Status Overview",
+        show_header=True,
+        header_style="bold magenta",
     )
-    table.add_column("Model Name", style="bold white")
-    table.add_column("Config Path", style="dim white")
+    table.add_column("Model Name", style="cyan")
+    table.add_column("Config Path", style="dim")
     table.add_column("Status", justify="center")
     table.add_column("Progress", justify="right")
-    table.add_column("Action", style="dim white")
+    table.add_column("Action", style="green")
 
     for s in statuses:
         status_str = s["status"]
         if status_str == "COMPLETED":
             status_style = "[bold green]COMPLETED[/bold green]"
             action_style = "Skip (Already evaluated)"
-            progress_str = f"{s['last_epoch']}/{s['total_epochs']}"
+            progress_str = f"{s['total_epochs']}/{s['total_epochs']}"
         elif status_str == "RESUMABLE":
             status_style = "[bold yellow]RESUMABLE[/bold yellow]"
-            action_style = f"Resume at Epoch {s['last_epoch'] + 1}"
+            action_style = f"Resume from epoch {s['last_epoch'] + 1}"
             progress_str = f"{s['last_epoch']}/{s['total_epochs']}"
         else:
-            status_style = "[dim white]NOT STARTED[/dim white]"
-            action_style = "Train from scratch (Epoch 1)"
+            status_style = "[dim]NOT STARTED[/dim]"
+            action_style = "Train from scratch"
             progress_str = f"0/{s['total_epochs']}"
 
         table.add_row(
@@ -169,6 +248,7 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
 
     # Determine mode if interactive
     has_resumable = any(s["status"] == "RESUMABLE" for s in statuses)
+    all_completed = all(s["status"] == "COMPLETED" for s in statuses)
 
     if mode == "auto" and has_resumable:
         print("Interrupted experiments detected!")
@@ -183,7 +263,10 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
         except (KeyboardInterrupt, EOFError):
             mode = "resume"
     elif mode == "auto":
-        mode = "scratch"
+        if all_completed:
+            mode = "resume"
+        else:
+            mode = "scratch"
 
     is_resume_mode = (mode == "resume")
 
@@ -206,23 +289,29 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
                     with open(metrics_path, "r", encoding="utf-8") as f:
                         eval_metrics = json.load(f)
 
+                    n_params = count_parameters(status_info["model_name"])
+                    val_metrics = extract_model_val_metrics(status_info["save_dir"])
+
                     row = {
                         "Model": status_info["model_name"],
                         "Experiment": status_info["experiment_name"],
-                        "Accuracy": eval_metrics.get("accuracy", 0.0),
-                        "Precision": eval_metrics.get("precision", 0.0),
-                        "Recall": eval_metrics.get("recall", 0.0),
-                        "F1_Score": eval_metrics.get("f1_score", 0.0),
-                        "Best_Val_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
-                        "Best_Epoch": status_info["last_epoch"],
-                        "Parameters": 0,
-                        "Parameters_M": 0.0,
+                        "Best_Epoch": status_info.get("best_epoch", status_info["last_epoch"]),
+                        "Val_Accuracy": val_metrics["Val_Accuracy"],
+                        "Val_Precision": val_metrics["Val_Precision"],
+                        "Val_Recall": val_metrics["Val_Recall"],
+                        "Val_F1_Score": val_metrics["Val_F1_Score"],
+                        "Test_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
+                        "Test_Precision": eval_metrics.get("precision", 0.0) * 100,
+                        "Test_Recall": eval_metrics.get("recall", 0.0) * 100,
+                        "Test_F1_Score": eval_metrics.get("f1_score", 0.0) * 100,
+                        "Parameters": n_params,
+                        "Parameters_M": n_params / 1e6,
                         "Training_Time_s": 0.0,
                         "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
                         "Model_Size_MB": get_model_size_mb(status_info["save_dir"]),
                     }
                     results_list.append(row)
-                    print(f"  [SKIP] {status_info['model_name']} - Already COMPLETED (Accuracy: {row['Accuracy']:.4f}, F1: {row['F1_Score']:.4f})")
+                    print(f"  [SKIP] {status_info['model_name']} - Already COMPLETED (Test Acc: {row['Test_Accuracy']:.2f}%, Val Acc: {row['Val_Accuracy']:.2f}%)")
                     continue
                 except Exception as e:
                     print(f"  Warning: Failed to load completed metrics from {metrics_path}: {e}")
@@ -234,25 +323,26 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
             total_time = time.time() - start_time
 
             eval_metrics = result.get("eval_metrics", {})
+            save_d = result.get("history", {}).get("save_dir", "") if isinstance(result.get("history"), dict) else ""
+            val_metrics = extract_model_val_metrics(save_d)
 
             row = {
                 "Model": result.get("model_name", "unknown"),
                 "Experiment": result.get("experiment_name", "unknown"),
-                "Accuracy": eval_metrics.get("accuracy", 0.0),
-                "Precision": eval_metrics.get("precision", 0.0),
-                "Recall": eval_metrics.get("recall", 0.0),
-                "F1_Score": eval_metrics.get("f1_score", 0.0),
-                "Best_Val_Accuracy": result.get("best_val_accuracy", 0.0),
                 "Best_Epoch": result.get("best_epoch", 0),
+                "Val_Accuracy": val_metrics["Val_Accuracy"],
+                "Val_Precision": val_metrics["Val_Precision"],
+                "Val_Recall": val_metrics["Val_Recall"],
+                "Val_F1_Score": val_metrics["Val_F1_Score"],
+                "Test_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
+                "Test_Precision": eval_metrics.get("precision", 0.0) * 100,
+                "Test_Recall": eval_metrics.get("recall", 0.0) * 100,
+                "Test_F1_Score": eval_metrics.get("f1_score", 0.0) * 100,
                 "Parameters": result.get("num_params", 0),
                 "Parameters_M": result.get("num_params", 0) / 1e6,
                 "Training_Time_s": total_time,
                 "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
-                "Model_Size_MB": get_model_size_mb(
-                    result.get("history", {}).get("save_dir", "")
-                    if isinstance(result.get("history"), dict)
-                    else ""
-                ),
+                "Model_Size_MB": get_model_size_mb(save_d),
             }
 
             from src.utils.config import load_config
@@ -261,8 +351,8 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
 
             results_list.append(row)
 
-            print(f"\n  [OK] {row['Model']} - Accuracy: {row['Accuracy']:.4f}, "
-                  f"F1: {row['F1_Score']:.4f}, Time: {total_time:.0f}s")
+            print(f"\n  [OK] {row['Model']} - Test Acc: {row['Test_Accuracy']:.2f}%, "
+                  f"Test F1: {row['Test_F1_Score']:.2f}%, Time: {total_time:.0f}s")
 
         except Exception as e:
             print(f"\n  [FAIL] {config_path}")
@@ -270,55 +360,9 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
             import traceback
             traceback.print_exc()
 
-    # Build comparison DataFrame
-    df = pd.DataFrame(results_list)
-
-    if len(df) > 0:
-        df = df.sort_values("Accuracy", ascending=False).reset_index(drop=True)
-
-        output_dir = "./outputs"
-        os.makedirs(output_dir, exist_ok=True)
-
-        csv_path = os.path.join(output_dir, "comparison_table.csv")
-        df.to_csv(csv_path, index=False)
-
-        md_path = os.path.join(output_dir, "comparison_table.md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write("# Model Comparison Results\n\n")
-            f.write(df.to_markdown(index=False))
-
-        metrics_dict = {}
-        for _, row in df.iterrows():
-            metrics_dict[row["Model"]] = {
-                "accuracy": row["Accuracy"] * 100,
-                "precision": row["Precision"] * 100,
-                "recall": row["Recall"] * 100,
-                "f1_score": row["F1_Score"] * 100,
-            }
-
-        for metric in ["accuracy", "precision", "recall", "f1_score"]:
-            plot_comparison_bar(metrics_dict, metric, output_dir)
-
-        print(f"\n\n{'='*60}")
-        print("  EXPERIMENT COMPARISON SUMMARY")
-        print(f"{'='*60}\n")
-
-        display_cols = [
-            "Model", "Accuracy", "Precision", "Recall", "F1_Score",
-            "Parameters_M", "Training_Time_s",
-        ]
-        display_df = df[display_cols].copy()
-        display_df["Accuracy"] = display_df["Accuracy"].apply(lambda x: f"{x:.4f}")
-        display_df["Precision"] = display_df["Precision"].apply(lambda x: f"{x:.4f}")
-        display_df["Recall"] = display_df["Recall"].apply(lambda x: f"{x:.4f}")
-        display_df["F1_Score"] = display_df["F1_Score"].apply(lambda x: f"{x:.4f}")
-        display_df["Parameters_M"] = display_df["Parameters_M"].apply(lambda x: f"{x:.2f}M")
-        display_df["Training_Time_s"] = display_df["Training_Time_s"].apply(lambda x: f"{x:.0f}s")
-
-        print(display_df.to_string(index=False))
-        print(f"\n  Results saved to: {csv_path}")
-        print(f"  Markdown table: {md_path}")
-
+    # Generate comparison report and visualization bar plots
+    from generate_comparison import generate_base_comparison_report
+    df = generate_base_comparison_report(config_paths=config_paths)
     return df
 
 

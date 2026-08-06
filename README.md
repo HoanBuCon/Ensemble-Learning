@@ -129,6 +129,14 @@ python run_experiments.py
 python evaluate.py configs/resnet50.yaml --split test
 ```
 
+#### 5b. Standalone Base Model Comparison Reports
+
+Re-generate comparison tables, CSVs, Markdown summaries, and metric bar charts independently at any time without re-running training:
+
+```bash
+python generate_comparison.py
+```
+
 #### 6. Perform Ensemble Experiments
 
 Run automated ensemble evaluation across trained models:
