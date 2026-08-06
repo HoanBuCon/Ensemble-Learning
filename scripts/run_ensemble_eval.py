@@ -186,8 +186,18 @@ def run_ensemble_evaluation(
         meta_train_probs = val_probs_list
         meta_train_labels = val_labels
     else: # mode == 'oof'
-        oof_gen = OOFGenerator(config_paths=[os.path.join("configs", f"{m}.yaml") for m in base_models])
-        meta_train_probs, meta_train_labels, _ = oof_gen.generate_all_oof()
+        meta_train_probs = []
+        meta_train_labels = None
+        for m in base_models:
+            cfg_path = os.path.join("configs", f"{m}.yaml")
+            if not os.path.exists(cfg_path):
+                print(f"Config path for {m} not found at {cfg_path}. Skipping.")
+                continue
+            oof_gen = OOFGenerator(config=cfg_path)
+            oof_probs, oof_lbls, _ = oof_gen.generate()
+            meta_train_probs.append(oof_probs)
+            if meta_train_labels is None:
+                meta_train_labels = oof_lbls
 
     meta_test_probs = base_test_probs_list
 

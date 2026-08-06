@@ -93,6 +93,18 @@ class OOFGenerator:
         set_seed(self.config.seed)
         cfg = self.config
 
+        # Check if OOF files already exist
+        oof_prob_file = os.path.join(self.output_dir, "oof_probabilities.npy")
+        oof_lbl_file = os.path.join(self.output_dir, "oof_labels.npy")
+        test_prob_file = os.path.join(self.output_dir, "test_probabilities.npy")
+
+        if os.path.exists(oof_prob_file) and os.path.exists(oof_lbl_file):
+            self.logger.info(f"Existing OOF predictions found in '{self.output_dir}'. Loading cached arrays.")
+            oof_probs = np.load(oof_prob_file)
+            oof_lbls = np.load(oof_lbl_file)
+            test_probs = np.load(test_prob_file) if os.path.exists(test_prob_file) else None
+            return oof_probs, oof_lbls, test_probs
+
         # Build full training dataset (no shuffle in dataset itself)
         image_size = cfg.data.image_size
         train_transform = build_transforms(

@@ -107,7 +107,7 @@ EXAMPLES & COMMON WORKFLOWS:
      $ python main.py train configs/resnet50.yaml --resume
 
   4. Evaluate a Trained Model Checkpoint:
-     $ python main.py evaluate configs/resnet50.yaml --split test   # Evaluate best_model.pth on Test
+     $ python main.py evaluate configs/resnet50.yaml                # Evaluate best_model.pth on Test (Default)
      $ python main.py evaluate configs/resnet50.yaml --split val    # Evaluate best_model.pth on Val
 
   5. Perform Ensemble Evaluation Only (Voting & Stacking):
@@ -239,6 +239,46 @@ ENSEMBLE PROTOCOLS EXPLAINED:
     return parser
 
 
+def prompt_base_models_training(outputs_dir: str = "outputs") -> str:
+    """
+    Check if valid base model outputs exist in outputs_dir, and interactively
+    prompt the user to choose between using existing outputs or re-training from scratch.
+
+    Returns:
+        Training mode string: 'auto' (use existing outputs/skip) or 'scratch' (re-train from scratch).
+    """
+    from scripts.run_experiments import inspect_model_status
+    config_paths = sorted(glob.glob("configs/*.yaml"))
+    if not config_paths:
+        return "auto"
+
+    statuses = [inspect_model_status(p) for p in config_paths]
+    completed_models = [s for s in statuses if s["status"] == "COMPLETED"]
+
+    if completed_models:
+        print("\n" + "=" * 80)
+        print("           EXISTING TRAINED BASE MODEL OUTPUTS DETECTED")
+        print("=" * 80)
+        print("  Found completed trained base model outputs in 'outputs/':")
+        for m in completed_models:
+            acc = m.get("best_val_accuracy", 0.0) * 100 if m.get("best_val_accuracy", 0.0) <= 1.0 else m.get("best_val_accuracy", 0.0)
+            print(f"  - {m['model_name']} ({m['config_path']}): Val Acc: {acc:.2f}%")
+        print("\n  Select Base Model Training Action:")
+        print("  [1] Use existing outputs & proceed directly to Ensemble Evaluation (Fast) [Default]")
+        print("  [2] Re-train all 4 base models from scratch (Epoch 1)")
+        print("-" * 80)
+        try:
+            choice = input("Select option [1/2] (default: 1): ").strip()
+            if choice == "2":
+                return "scratch"
+            else:
+                return "auto"
+        except (KeyboardInterrupt, EOFError):
+            return "auto"
+
+    return "auto"
+
+
 def main() -> None:
     """Main CLI execution handler."""
     parser = build_parser()
@@ -267,20 +307,16 @@ def main() -> None:
 
     elif args.command in ["all-in-one", "pipeline", "full-pipeline"]:
         config_paths = resolve_config_paths(args.configs)
+        train_mode = prompt_base_models_training(outputs_dir=args.outputs_dir)
         ensemble_mode = prompt_ensemble_mode(args.ensemble_mode)
 
         print("\n" + "=" * 80)
-        print("  STEP 1/3: RUNNING BASE MODELS BENCHMARK & EVALUATION")
+        print(f"  STEP 1/2: BASE MODELS BENCHMARK & REPORT GENERATION (MODE: {train_mode.upper()})")
         print("=" * 80 + "\n")
-        run_experiments(config_paths, mode=args.train_mode)
+        run_experiments(config_paths, mode=train_mode)
 
         print("\n" + "=" * 80)
-        print("  STEP 2/3: GENERATING BASE MODEL COMPARISON REPORT & PLOTS")
-        print("=" * 80 + "\n")
-        generate_base_comparison_report(outputs_dir=args.outputs_dir, config_paths=config_paths)
-
-        print("\n" + "=" * 80)
-        print(f"  STEP 3/3: RUNNING ENSEMBLE EVALUATION (MODE: {ensemble_mode.upper()})")
+        print(f"  STEP 2/2: ENSEMBLE EVALUATION PIPELINE (MODE: {ensemble_mode.upper()})")
         print("=" * 80 + "\n")
         run_ensemble_evaluation(mode=ensemble_mode, outputs_dir=args.outputs_dir)
 

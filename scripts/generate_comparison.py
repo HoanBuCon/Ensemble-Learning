@@ -35,6 +35,7 @@ from src.utils.report import (
     get_model_size_mb,
     extract_model_history_info,
     extract_model_val_metrics,
+    extract_model_training_time,
 )
 from src.utils.visualization import plot_comparison_bar
 
@@ -113,6 +114,7 @@ def generate_base_comparison_report(
         n_params = count_parameters(base_name)
         val_metrics = extract_model_val_metrics(m_dir)
         hist_info = extract_model_history_info(m_dir)
+        train_time_str = extract_model_training_time(m_dir)
 
         row = {
             "Model": base_name,
@@ -128,7 +130,7 @@ def generate_base_comparison_report(
             "Test_F1_Score": eval_metrics.get("f1_score", 0.0) * 100,
             "Parameters": n_params,
             "Parameters_M": n_params / 1e6,
-            "Training_Time_s": 0.0,
+            "Training_Time": train_time_str,
             "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
             "Model_Size_MB": get_model_size_mb(m_dir),
         }
@@ -184,7 +186,7 @@ def generate_base_comparison_report(
         "Model", "Best_Epoch",
         "Val_Accuracy", "Val_Precision", "Val_Recall", "Val_F1_Score",
         "Test_Accuracy", "Test_Precision", "Test_Recall", "Test_F1_Score",
-        "Parameters_M", "Model_Size_MB",
+        "Parameters_M", "Training_Time", "Model_Size_MB",
     ]
     display_cols = [c for c in display_cols if c in formatted_df.columns]
     display_df = formatted_df[display_cols]

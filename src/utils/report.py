@@ -106,3 +106,18 @@ def extract_model_val_metrics(save_dir: str) -> Dict[str, float]:
         "Val_Recall": best_val,
         "Val_F1_Score": best_val,
     }
+
+
+def extract_model_training_time(save_dir: str) -> str:
+    """Extract total elapsed training time string from history.csv if available."""
+    history_csv = os.path.join(save_dir, "history.csv")
+    if os.path.exists(history_csv):
+        try:
+            import pandas as pd
+            df_hist = pd.read_csv(history_csv)
+            if "elapsed" in df_hist.columns and len(df_hist) > 0:
+                last_elapsed = str(df_hist["elapsed"].iloc[-1]).strip()
+                return last_elapsed
+        except Exception:
+            pass
+    return "N/A"
