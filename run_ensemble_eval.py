@@ -41,6 +41,40 @@ from src.utils.config import load_config
 from src.utils.metrics import compute_metrics
 
 
+import re
+
+
+def get_latest_model_dirs(outputs_dir: str = "outputs") -> list[str]:
+    """
+    Find latest directory for each base model in outputs_dir.
+    For example, if outputs contains resnet50 and resnet50_1, selects resnet50_1.
+    Ignores non-model folders (e.g., 'val', 'oof') without probabilities.npy.
+    """
+    all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
+    valid_dirs = [
+        d for d in all_dirs
+        if os.path.isdir(d) and os.path.exists(os.path.join(d, "probabilities.npy"))
+    ]
+
+    model_groups: dict[str, list[tuple[int, str]]] = {}
+    for d in valid_dirs:
+        folder_name = os.path.basename(d)
+        match = re.match(r"^(.*?)(?:_(\d+))?$", folder_name)
+        if match:
+            base_name = match.group(1)
+            version = int(match.group(2)) if match.group(2) else 0
+            if base_name not in model_groups:
+                model_groups[base_name] = []
+            model_groups[base_name].append((version, d))
+
+    latest_dirs = []
+    for base_name, versions in sorted(model_groups.items()):
+        versions.sort(key=lambda x: x[0], reverse=True)
+        latest_dirs.append(versions[0][1])
+
+    return sorted(latest_dirs)
+
+
 def generate_val_predictions_if_missing(model_dirs: list[str]) -> None:
     """Generate val_probabilities.npy and val_labels.npy if missing."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -53,7 +87,9 @@ def generate_val_predictions_if_missing(model_dirs: list[str]) -> None:
             continue
 
         m_name = os.path.basename(m_dir)
-        config_path = os.path.join("configs", f"{m_name}.yaml")
+        # Extract base model name if folder is versioned (e.g. resnet50_1 -> resnet50)
+        config_name = re.sub(r"_\d+$", "", m_name)
+        config_path = os.path.join("configs", f"{config_name}.yaml")
 
         if not os.path.exists(config_path):
             print(f"Config file for {m_name} not found at {config_path}. Skipping.")
@@ -86,8 +122,8 @@ def generate_val_predictions_if_missing(model_dirs: list[str]) -> None:
         torch.cuda.empty_cache()
 
 
-def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
-    """Run ensemble evaluation based on selected mode (val or oof)."""
+def run_ensemble_evaluation(mode: str = "interactive", outputs_dir: str = "outputs") -> pd.DataFrame:
+    """Run ensemble evaluation based on selected mode (val or oof) and outputs_dir."""
     
     if mode not in ["val", "oof"]:
         print("\n" + "=" * 80)
@@ -110,19 +146,21 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
 
     print(f"\n>>> SELECTED MODE: {'FULL 5-FOLD OOF' if mode == 'oof' else 'VALIDATION SPLIT'} <<<\n")
 
-    model_dirs = sorted(glob.glob("outputs/*"))
-    model_dirs = [d for d in model_dirs if os.path.isdir(d) and os.path.exists(os.path.join(d, "probabilities.npy"))]
+    model_dirs = get_latest_model_dirs(outputs_dir)
 
     if len(model_dirs) == 0:
-        print("No model predictions found in outputs/. Train models first.")
+        print(f"No model predictions found in '{outputs_dir}'. Train models first.")
         return pd.DataFrame()
 
     model_names = [os.path.basename(d) for d in model_dirs]
-    test_probs_list = [np.load(os.path.join(d, "probabilities.npy")) for d in model_dirs]
+    # Base test predictions from fully-trained models (always used for Single Model baseline)
+    base_test_probs_list = [np.load(os.path.join(d, "probabilities.npy")) for d in model_dirs]
     test_labels = np.load(os.path.join(model_dirs[0], "labels.npy"))
+    # Ensemble test predictions — may be overridden by OOF-averaged predictions in oof mode
+    ensemble_test_probs_list = base_test_probs_list
 
     print(f"Loaded {len(model_names)} models: {', '.join(model_names)}")
-    print(f"Test dataset size: {len(test_labels)} samples, {test_probs_list[0].shape[1]} classes\n")
+    print(f"Test dataset size: {len(test_labels)} samples, {base_test_probs_list[0].shape[1]} classes\n")
 
     fit_probs_list = []
     fit_labels = None
@@ -150,18 +188,19 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
                 fit_labels = oof_lbls
         print(f"OOF dataset size for fitting Meta-Learner: {len(fit_labels)} samples")
 
-        # Override test predictions with OOF-averaged test predictions
-        # This ensures the same fold models that generated OOF also predict test
+        # Override ENSEMBLE test predictions with OOF-averaged test predictions
+        # Base model results always use fully-trained model predictions
         if len(oof_test_probs_list) == len(model_names):
-            test_probs_list = oof_test_probs_list
-            print("Test predictions: Using OOF-averaged test probabilities (5-fold averaged)\n")
+            ensemble_test_probs_list = oof_test_probs_list
+            print("Ensemble test predictions: Using OOF-averaged test probabilities (5-fold averaged)")
         else:
-            print("Warning: OOF test predictions incomplete. Falling back to fully-trained model predictions.\n")
+            print("Warning: OOF test predictions incomplete. Falling back to fully-trained model predictions.")
+        print(f"Base model test predictions: Using fully-trained model probabilities (unchanged)\n")
 
     results = []
 
-    # 1. Individual Models Baseline
-    for name, test_prob in zip(model_names, test_probs_list):
+    # 1. Individual Models Baseline (ALWAYS use base_test_probs from fully-trained models)
+    for name, test_prob in zip(model_names, base_test_probs_list):
         preds = np.argmax(test_prob, axis=1)
         m = compute_metrics(test_labels, preds)
         results.append({
@@ -177,9 +216,9 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
 
     print("-" * 60)
 
-    # 2. Hard Voting
+    # 2. Hard Voting (uses base_test_probs — no fitting needed)
     hv = HardVoting()
-    hv_metrics = hv.evaluate(test_probs_list, test_labels)
+    hv_metrics = hv.evaluate(base_test_probs_list, test_labels)
     results.append({
         "Method": "Hard Voting Ensemble",
         "Type": "Ensemble (Voting)",
@@ -191,9 +230,9 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
     })
     print(f"  [Ensemble] Hard Voting          Acc: {hv_metrics['accuracy']*100:.2f}%, F1: {hv_metrics['f1_score']*100:.2f}%")
 
-    # 3. Soft Voting
+    # 3. Soft Voting (uses base_test_probs — no fitting needed)
     sv = SoftVoting()
-    sv_metrics = sv.evaluate(test_probs_list, test_labels)
+    sv_metrics = sv.evaluate(base_test_probs_list, test_labels)
     results.append({
         "Method": "Soft Voting Ensemble",
         "Type": "Ensemble (Voting)",
@@ -205,10 +244,10 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
     })
     print(f"  [Ensemble] Soft Voting          Acc: {sv_metrics['accuracy']*100:.2f}%, F1: {sv_metrics['f1_score']*100:.2f}%")
 
-    # 4. Weighted Voting (Fitted on Val/OOF, Evaluated on Test)
+    # 4. Weighted Voting (Fitted on Val/OOF, Evaluated on Test with ensemble_test_probs)
     wv = WeightedVoting()
     wv.fit(fit_probs_list, fit_labels)
-    wv_metrics = wv.evaluate(test_probs_list, test_labels)
+    wv_metrics = wv.evaluate(ensemble_test_probs_list, test_labels)
     weights_str = ", ".join([f"{n}: {w:.2f}" for n, w in zip(model_names, wv.weights)])
     results.append({
         "Method": "Weighted Voting Ensemble",
@@ -221,12 +260,12 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
     })
     print(f"  [Ensemble] Weighted Voting      Acc: {wv_metrics['accuracy']*100:.2f}%, F1: {wv_metrics['f1_score']*100:.2f}%")
 
-    # 5. Stacking Ensembles (Fitted on Val/OOF, Evaluated on Test)
+    # 5. Stacking Ensembles (Fitted on Val/OOF, Evaluated on Test with ensemble_test_probs)
     for meta_learner in ["logistic_regression", "random_forest", "xgboost"]:
         try:
             st = StackingEnsemble(meta_learner=meta_learner)
             st.fit(fit_probs_list, fit_labels)
-            st_metrics = st.evaluate(test_probs_list, test_labels)
+            st_metrics = st.evaluate(ensemble_test_probs_list, test_labels)
             
             method_name = f"Stacking ({meta_learner.replace('_', ' ').title()})"
             fit_source_name = "5-Fold OOF Train" if mode == "oof" else "Validation Set"
@@ -263,7 +302,7 @@ def run_ensemble_evaluation(mode: str = "interactive") -> pd.DataFrame:
     cols = ["Method", "Type", "Accuracy", "Improvement", "Precision", "Recall", "F1_Score", "Details"]
     df = df[cols]
 
-    output_dir = "./outputs"
+    output_dir = os.path.join(outputs_dir, mode)
     os.makedirs(output_dir, exist_ok=True)
     csv_path = os.path.join(output_dir, "ensemble_comparison.csv")
     md_path = os.path.join(output_dir, "ensemble_comparison.md")
@@ -299,6 +338,11 @@ if __name__ == "__main__":
         default="interactive",
         help="Training source for Stacking & Weighted Voting (val or oof)",
     )
+    parser.add_argument(
+        "--outputs-dir",
+        default="outputs",
+        help="Directory containing base model outputs (default: 'outputs')",
+    )
     args = parser.parse_args()
 
-    run_ensemble_evaluation(mode=args.mode)
+    run_ensemble_evaluation(mode=args.mode, outputs_dir=args.outputs_dir)
