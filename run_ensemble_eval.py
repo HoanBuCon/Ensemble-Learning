@@ -117,20 +117,33 @@ def run_ensemble_evaluation() -> pd.DataFrame:
     })
     print(f"  [Ensemble] Weighted Voting      Accuracy: {wv_metrics['accuracy']*100:.2f}% ({weights_str})")
 
-    # 4. Stacking Ensembles
+    # 4. Stacking Ensembles (Evaluated via 5-Fold Stratified Cross-Validation to eliminate Data Leakage)
+    from sklearn.model_selection import StratifiedKFold
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
     for meta_learner in ["logistic_regression", "random_forest", "xgboost"]:
         try:
-            st = StackingEnsemble(meta_learner=meta_learner)
-            st.fit(probs_list, labels)
-            st_metrics = st.evaluate(probs_list, labels)
+            fold_accs = []
+            for train_idx, val_idx in skf.split(probs_list[0], labels):
+                train_probs = [p[train_idx] for p in probs_list]
+                val_probs = [p[val_idx] for p in probs_list]
+                train_lbls = labels[train_idx]
+                val_lbls = labels[val_idx]
+
+                st = StackingEnsemble(meta_learner=meta_learner)
+                st.fit(train_probs, train_lbls)
+                eval_res = st.evaluate(val_probs, val_lbls)
+                fold_accs.append(eval_res["accuracy"])
+
+            mean_acc = float(np.mean(fold_accs))
             method_name = f"Stacking ({meta_learner.replace('_', ' ').title()})"
             results.append({
                 "Method": method_name,
                 "Type": "Ensemble (Stacking)",
-                "Accuracy": st_metrics["accuracy"],
-                "Details": f"Meta-learner: {meta_learner}",
+                "Accuracy": mean_acc,
+                "Details": f"Meta-learner: {meta_learner} (5-Fold CV - Out-of-Sample)",
             })
-            print(f"  [Ensemble] {method_name:<20} Accuracy: {st_metrics['accuracy']*100:.2f}%")
+            print(f"  [Ensemble] {method_name:<25} Accuracy: {mean_acc*100:.2f}% (5-Fold CV)")
         except Exception as e:
             print(f"  [Skip] Stacking ({meta_learner}): {e}")
 
