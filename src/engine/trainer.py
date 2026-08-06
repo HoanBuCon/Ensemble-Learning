@@ -273,7 +273,17 @@ class Trainer:
         Returns:
             start_epoch (1-indexed).
         """
-        last_ckpt_path = os.path.join(self.config.checkpoint.save_dir, "last_model.pth")
+        save_dir = self.config.checkpoint.save_dir
+        metrics_path = os.path.join(save_dir, "metrics.json")
+        last_ckpt_path = os.path.join(save_dir, "last_model.pth")
+
+        if os.path.exists(metrics_path):
+            self.logger.info(
+                f"Experiment '{self.config.experiment_name}' at '{save_dir}' is already COMPLETED (metrics.json found). "
+                f"Skipping training."
+            )
+            return self.config.train.epochs + 1
+
         if not os.path.exists(last_ckpt_path):
             self.logger.warning(
                 f"Resume requested but no last_model.pth found at '{last_ckpt_path}'. "
@@ -282,6 +292,13 @@ class Trainer:
             return 1
 
         ckpt = self.ckpt_manager.load_last(device=str(self.device))
+
+        if ckpt.get("completed", False):
+            self.logger.info(
+                f"Experiment '{self.config.experiment_name}' was already completed/early-stopped. Skipping training."
+            )
+            return self.config.train.epochs + 1
+
         self.model.load_state_dict(ckpt["model_state_dict"])
         if "optimizer_state_dict" in ckpt and self.optimizer is not None:
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -291,7 +308,7 @@ class Trainer:
             self.history = ckpt["history"]
 
         # Restore best metric value
-        best_ckpt_path = os.path.join(self.config.checkpoint.save_dir, "best_model.pth")
+        best_ckpt_path = os.path.join(save_dir, "best_model.pth")
         if os.path.exists(best_ckpt_path):
             best_ckpt = self.ckpt_manager.load_best(device=str(self.device))
             self.ckpt_manager.best_value = best_ckpt.get("best_value", self.ckpt_manager.best_value)
@@ -299,6 +316,7 @@ class Trainer:
 
         last_epoch = ckpt.get("epoch", 0)
         start_epoch = last_epoch + 1
+
         self.logger.info(
             f"Resuming training from epoch {start_epoch}/{self.config.train.epochs} "
             f"(Restored last epoch {last_epoch}, best {self.config.checkpoint.monitor}: {self._best_metric:.4f})"
@@ -322,6 +340,22 @@ class Trainer:
 
         if self.is_resume:
             start_epoch = self._restore_checkpoint()
+
+        if start_epoch > total_epochs:
+            best_val_acc = (
+                max(self.history["val_accuracy"])
+                if self.history.get("val_accuracy")
+                else (self._best_metric if self._best_metric != -float("inf") else 0.0)
+            )
+            return {
+                "model_name": cfg.model.name,
+                "experiment_name": cfg.experiment_name,
+                "best_val_accuracy": best_val_acc,
+                "best_epoch": self.ckpt_manager.best_epoch or total_epochs,
+                "num_params": self.num_params,
+                "eval_metrics": {},
+                "history": self.history,
+            }
 
         log_training_start(
             experiment_name=cfg.experiment_name,

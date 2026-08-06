@@ -192,9 +192,40 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
     print(f"{'='*60}\n")
 
     for i, config_path in enumerate(config_paths):
+        status_info = statuses[i]
+
         print(f"\n{'-'*60}")
         print(f"  Experiment {i+1}/{len(config_paths)}: {config_path}")
         print(f"{'-'*60}\n")
+
+        # Skip already completed models in resume mode
+        if is_resume_mode and status_info["status"] == "COMPLETED":
+            metrics_path = os.path.join(status_info["save_dir"], "metrics.json")
+            if os.path.exists(metrics_path):
+                try:
+                    with open(metrics_path, "r", encoding="utf-8") as f:
+                        eval_metrics = json.load(f)
+
+                    row = {
+                        "Model": status_info["model_name"],
+                        "Experiment": status_info["experiment_name"],
+                        "Accuracy": eval_metrics.get("accuracy", 0.0),
+                        "Precision": eval_metrics.get("precision", 0.0),
+                        "Recall": eval_metrics.get("recall", 0.0),
+                        "F1_Score": eval_metrics.get("f1_score", 0.0),
+                        "Best_Val_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
+                        "Best_Epoch": status_info["last_epoch"],
+                        "Parameters": 0,
+                        "Parameters_M": 0.0,
+                        "Training_Time_s": 0.0,
+                        "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
+                        "Model_Size_MB": get_model_size_mb(status_info["save_dir"]),
+                    }
+                    results_list.append(row)
+                    print(f"  [SKIP] {status_info['model_name']} - Already COMPLETED (Accuracy: {row['Accuracy']:.4f}, F1: {row['F1_Score']:.4f})")
+                    continue
+                except Exception as e:
+                    print(f"  Warning: Failed to load completed metrics from {metrics_path}: {e}")
 
         start_time = time.time()
 
