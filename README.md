@@ -25,6 +25,7 @@ Enterprise-grade PyTorch research framework designed for image classification an
   - Soft Voting (Probability Averaging)
   - Weighted Voting (Automated grid-search optimization)
   - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) with Out-of-Fold (OOF) prediction generation to prevent data leakage.
+- **Unified Master CLI (`main.py`)**: Centralized command-line entrypoint for orchestrating training, evaluation, benchmarking, ensemble, and reporting.
 - **Reproducibility**: Global seed management, deterministic CUDA operations, and seeded DataLoaders.
 - **Platform Agnostic**: Runs seamlessly on local machines (Windows/Linux/macOS), Kaggle, and Google Colab.
 
@@ -32,20 +33,24 @@ Enterprise-grade PyTorch research framework designed for image classification an
 
 ```
 pipeline/
+├── main.py                   # Master CLI controller
 ├── configs/                  # YAML configuration files
 │   ├── resnet50.yaml
 │   ├── densenet121.yaml
 │   ├── efficientnet_b0.yaml
 │   └── swin_tiny.yaml
+├── scripts/                  # Modular entrypoint scripts
+│   ├── train.py              # Single-model training script
+│   ├── evaluate.py           # Standalone evaluation script
+│   ├── run_experiments.py   # Multi-model benchmark runner
+│   ├── run_ensemble_eval.py  # Ensemble evaluation pipeline
+│   └── generate_comparison.py# Comparison report & plot generator
 ├── src/
 │   ├── datasets/             # Dataset loaders & Albumentations transforms
 │   ├── models/               # ModelFactory with backbone registrations
 │   ├── engine/               # Generic Trainer, Evaluator, & CheckpointManager
 │   ├── ensemble/             # Voting, Stacking, and OOF Generators
-│   └── utils/                # Config parser, Logger, Metrics, & Visualization
-├── train.py                  # Single-model training entry point
-├── evaluate.py               # Standalone evaluation entry point
-├── run_experiments.py        # Automated multi-model experiment runner
+│   └── utils/                # Config parser, Logger, Metrics, Visualization, & Reports
 ├── requirements.txt          # Frozen dependencies
 └── README.md
 ```
@@ -101,52 +106,48 @@ data/
     └── ...
 ```
 
-#### 3. Train a Single Model
+#### 3. Master CLI Controller (`main.py`)
+
+Use `python main.py` as the primary interface for all commands:
 
 ```bash
-python train.py configs/resnet50.yaml
+# ⭐️ 1. Full End-to-End Pipeline (Train All Base -> Report -> Ensemble)
+python main.py all-in-one                       # Interactive prompt for val vs oof mode
+python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
+python main.py all-in-one --ensemble-mode oof   # Full 5-Fold OOF mode (~10-13 hrs)
+
+# 2. Train & Evaluate ALL Base Models Only (No Ensemble)
+python main.py train-all                 # Default: auto-detect & skip completed models
+python main.py train-all --mode scratch  # Re-train all base models from scratch (Epoch 1)
+python main.py train-all --mode resume   # Resume training from last saved checkpoint
+
+# 3. Train a Single Base Model
+python main.py train configs/resnet50.yaml
+python main.py train configs/resnet50.yaml --resume
+
+# 4. Evaluate a Trained Model Checkpoint
+python main.py evaluate configs/resnet50.yaml                                    # Evaluate best_model.pth on Test
+python main.py evaluate configs/resnet50.yaml --split val                       # Evaluate best_model.pth on Val
+
+# 5. Perform Ensemble Evaluation Only (Voting & Stacking)
+python main.py ensemble                          # Interactive prompt for val vs oof mode
+python main.py ensemble --mode val               # Fast Validation Mode (~30s)
+python main.py ensemble --mode oof               # Full 5-Fold OOF Mode (~10-13 hrs)
+
+# 6. Re-generate Comparison Tables & Plots Only
+python main.py report
 ```
 
-*Or inside Python / Jupyter Notebook:*
+#### 4. Direct Modular Script Execution (`scripts/`)
 
-```python
-from train import train
-
-results = train("configs/resnet50.yaml")
-```
-
-#### 4. Run All Experiments (Sequential Comparison)
-
-Train all models sequentially and generate a baseline comparison table (`comparison_table.csv` & `comparison_table.md`):
+Alternatively, run specific entry scripts directly from the `scripts/` folder:
 
 ```bash
-python run_experiments.py
-```
-
-#### 5. Evaluate Trained Model
-
-```bash
-python evaluate.py configs/resnet50.yaml --split test
-```
-
-#### 5b. Standalone Base Model Comparison Reports
-
-Re-generate comparison tables, CSVs, Markdown summaries, and metric bar charts independently at any time without re-running training:
-
-```bash
-python generate_comparison.py
-```
-
-#### 6. Perform Ensemble Experiments
-
-Run automated ensemble evaluation across trained models:
-
-```bash
-# Mode 1: Validation Mode (Fast Prototyping ~30 sec)
-python run_ensemble_eval.py --mode val
-
-# Mode 2: Full 5-Fold OOF Mode (Gold-Standard Paper Quality ~10-13 hrs)
-python run_ensemble_eval.py --mode oof
+python scripts/train.py configs/resnet50.yaml
+python scripts/evaluate.py configs/resnet50.yaml --split test
+python scripts/run_experiments.py
+python scripts/run_ensemble_eval.py --mode val
+python scripts/generate_comparison.py
 ```
 
 *Or via Python API:*
@@ -182,7 +183,7 @@ stacker.fit(probs, labels) # Fit on OOF probabilities for leak-free evaluation
 print("Stacking:", stacker.evaluate(probs, labels))
 ```
 
-#### 7. Adding a New Model Architecture
+#### 5. Adding a New Model Architecture
 
 Register the model in `src/models/factory.py`:
 
@@ -193,7 +194,7 @@ def _convnext_tiny(pretrained: bool = True, num_classes: int = 6, **kwargs):
     return timm.create_model("convnext_tiny", pretrained=pretrained, num_classes=num_classes)
 ```
 
-Create `configs/convnext_tiny.yaml` and run `python train.py configs/convnext_tiny.yaml` without changing any training pipeline logic!
+Create `configs/convnext_tiny.yaml` and run `python main.py train configs/convnext_tiny.yaml` without changing any training pipeline logic!
 
 ---
 
@@ -218,6 +219,7 @@ Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ 
   - Soft Voting (Trung bình cộng xác suất)
   - Weighted Voting (Tối ưu hóa trọng số tự động bằng Grid-search)
   - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) để chống rò rỉ dữ liệu (data leakage).
+- **Bộ điều khiển Master CLI thống nhất (`main.py`)**: Giao diện dòng lệnh tập trung tại root điều khiển toàn bộ các thao tác train, evaluate, benchmark, ensemble và report.
 - **Tính tái lập (Reproducibility)**: Cố định seed toàn cục, cấu hình tính toán CUDA nhất quán và DataLoader theo seed.
 - **Tương thích đa nền tảng**: Chạy tốt trên máy cục bộ (Windows, Linux, macOS), Kaggle Notebooks và Google Colab.
 
@@ -225,20 +227,24 @@ Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ 
 
 ```
 pipeline/
+├── main.py                   # Bộ điều khiển Master CLI duy nhất
 ├── configs/                  # Các tệp cấu hình YAML
 │   ├── resnet50.yaml
 │   ├── densenet121.yaml
 │   ├── efficientnet_b0.yaml
 │   └── swin_tiny.yaml
+├── scripts/                  # Các script entrypoint mô-đun gọn gàng
+│   ├── train.py              # Script huấn luyện đơn mô hình
+│   ├── evaluate.py           # Script đánh giá mô hình độc lập
+│   ├── run_experiments.py   # Bộ chạy thử nghiệm tự động nhiều mô hình
+│   ├── run_ensemble_eval.py  # Script đánh giá Ensemble
+│   └── generate_comparison.py# Script xuất báo cáo & vẽ đồ thị so sánh
 ├── src/
 │   ├── datasets/             # Tải dữ liệu & biến đổi dữ liệu (Albumentations)
 │   ├── models/               # ModelFactory & Đăng ký mô hình
 │   ├── engine/               # Generic Trainer, Evaluator & CheckpointManager
 │   ├── ensemble/             # Mô-đun Ensemble (Voting, Stacking, OOF)
-│   └── utils/                # Đọc Config, Logger, Metrics & Đồ thị
-├── train.py                  # Điểm chạy huấn luyện đơn mô hình
-├── evaluate.py               # Điểm chạy đánh giá mô hình độc lập
-├── run_experiments.py        # Bộ chạy thử nghiệm tự động nhiều mô hình
+│   └── utils/                # Đọc Config, Logger, Metrics, Đồ thị & Báo cáo
 ├── requirements.txt          # Danh sách thư viện phụ thuộc đã khóa phiên bản
 └── README.md
 ```
@@ -294,44 +300,48 @@ data/
     └── ...
 ```
 
-#### 3. Huấn luyện một mô hình
+#### 3. Bộ điều khiển Master CLI (`main.py` - Khuyên dùng)
+
+Sử dụng `python main.py` làm giao diện chính duy nhất cho mọi lệnh:
 
 ```bash
-python train.py configs/resnet50.yaml
+# ⭐️ 1. Lệnh All-in-One chạy trọn gói Pipeline (Train Base -> Báo cáo Base -> Đánh giá Ensemble)
+python main.py all-in-one                       # Chọn mode val/oof qua giao diện menu tương tác
+python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
+python main.py all-in-one --ensemble-mode oof   # Full 5-Fold OOF mode (~10-13 hrs)
+
+# 2. Train & Đánh giá TẤT CẢ mô hình Base (Không chạy Ensemble)
+python main.py train-all                 # Mặc định: tự động phát hiện & skip mô hình đã train xong
+python main.py train-all --mode scratch  # Train lại tất cả mô hình base từ đầu (Epoch 1)
+python main.py train-all --mode resume   # Tiếp tục train các mô hình bị dở dang từ checkpoint
+
+# 3. Huấn luyện 1 mô hình đơn
+python main.py train configs/resnet50.yaml
+python main.py train configs/resnet50.yaml --resume
+
+# 4. Đánh giá độc lập một Checkpoint mô hình đã train
+python main.py evaluate configs/resnet50.yaml                                    # Đánh giá best_model.pth trên tập Test
+python main.py evaluate configs/resnet50.yaml --split val                       # Đánh giá best_model.pth trên tập Val
+
+# 5. Thực hiện thử nghiệm Ensemble (Voting & Stacking)
+python main.py ensemble                          # Chọn mode val/oof qua giao diện menu tương tác
+python main.py ensemble --mode val               # Chế độ Validation nhanh (~30s)
+python main.py ensemble --mode oof               # Chế độ Full 5-Fold OOF (~10-13 hrs)
+
+# 6. Tạo lại các bảng báo cáo & vẽ đồ thị so sánh mô hình base
+python main.py report
 ```
 
-*Hoặc trong môi trường Python / Jupyter Notebook:*
+#### 4. Chạy trực tiếp từ thư mục `scripts/`
 
-```python
-from train import train
-
-results = train("configs/resnet50.yaml")
-```
-
-#### 4. Chạy toàn bộ các thử nghiệm (So sánh hàng loạt)
-
-Huấn luyện lần lượt tất cả mô hình trong `configs/` và xuất bảng so sánh kết quả (`comparison_table.csv` & `comparison_table.md`):
+Bạn cũng có thể chạy trực tiếp các script mô-đun riêng lẻ trong thư mục `scripts/`:
 
 ```bash
-python run_experiments.py
-```
-
-#### 5. Đánh giá mô hình đã huấn luyện
-
-```bash
-python evaluate.py configs/resnet50.yaml --split test
-```
-
-#### 6. Thử nghiệm kết hợp mô hình (Ensemble)
-
-Chạy đánh giá tự động tất cả các phương pháp Ensemble trên các mô hình đã huấn luyện:
-
-```bash
-# Chế độ 1: Validation Mode (Thử nghiệm & Kiểm tra code nhanh ~30 giây)
-python run_ensemble_eval.py --mode val
-
-# Chế độ 2: Full 5-Fold OOF Mode (Đánh giá chuẩn báo cáo luận văn / bài báo ~10-13 giờ)
-python run_ensemble_eval.py --mode oof
+python scripts/train.py configs/resnet50.yaml
+python scripts/evaluate.py configs/resnet50.yaml --split test
+python scripts/run_experiments.py
+python scripts/run_ensemble_eval.py --mode val
+python scripts/generate_comparison.py
 ```
 
 *Hoặc qua Python API:*
@@ -367,7 +377,7 @@ stacker.fit(probs, labels) # Fit trên xác suất OOF để chống rò rỉ d�
 print("Stacking:", stacker.evaluate(probs, labels))
 ```
 
-#### 7. Thêm kiến trúc mô hình mới
+#### 5. Thêm kiến trúc mô hình mới
 
 Đăng ký mô hình mới trong `src/models/factory.py`:
 
@@ -378,7 +388,7 @@ def _convnext_tiny(pretrained: bool = True, num_classes: int = 6, **kwargs):
     return timm.create_model("convnext_tiny", pretrained=pretrained, num_classes=num_classes)
 ```
 
-Tạo tệp cấu hình `configs/convnext_tiny.yaml` và thực thi `python train.py configs/convnext_tiny.yaml` mà không cần thay đổi bất kỳ dòng mã nguồn huấn luyện nào!
+Tạo tệp cấu hình `configs/convnext_tiny.yaml` và thực thi `python main.py train configs/convnext_tiny.yaml` mà không cần thay đổi bất kỳ dòng mã nguồn huấn luyện nào!
 
 ---
 ## License

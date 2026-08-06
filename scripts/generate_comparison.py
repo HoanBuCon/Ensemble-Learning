@@ -1,22 +1,15 @@
 """
-Base Model Comparison Generator
-===============================
+Base Model Comparison Generator Script
+======================================
 
 Standalone script & module to extract model metrics (Validation & Test),
 format percentage comparison tables, export CSV/Markdown artifacts, and
 plot metric comparison bar charts.
 
-CLI Usage::
+CLI::
 
-    python generate_comparison.py
-    python generate_comparison.py --outputs-dir outputs
-    python generate_comparison.py --configs configs/resnet50.yaml configs/swin_tiny.yaml
-
-Python API::
-
-    from generate_comparison import generate_base_comparison_report
-
-    df = generate_base_comparison_report(outputs_dir="outputs")
+    python scripts/generate_comparison.py
+    python main.py report
 """
 
 from __future__ import annotations
@@ -25,15 +18,18 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
-import numpy as np
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import pandas as pd
 
-from src.models.factory import create_model
 from src.utils.config import load_config
-from src.utils.metrics import compute_metrics
 from src.utils.report import (
     count_parameters,
     get_model_size_mb,
@@ -57,8 +53,6 @@ def generate_base_comparison_report(
     Returns:
         DataFrame containing formatted comparison metrics.
     """
-    import re
-
     # Discover candidate model directories
     if config_paths:
         model_dirs = []
@@ -105,7 +99,6 @@ def generate_base_comparison_report(
 
     for m_dir in model_dirs:
         m_name = os.path.basename(m_dir)
-        # Extract base model name if versioned
         base_name = re.sub(r"_\d+$", "", m_name)
 
         metrics_path = os.path.join(m_dir, "metrics.json")

@@ -1,23 +1,25 @@
 """
-Train Entry Point
-=================
+Train Script
+============
 
-Simple one-liner interface for training a single model.
+Single model training script.
 
 CLI::
 
-    python train.py configs/resnet50.yaml
-
-Notebook::
-
-    from train import train
-    train("configs/resnet50.yaml")
+    python scripts/train.py configs/resnet50.yaml
+    python main.py train configs/resnet50.yaml
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any, Dict
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from src.engine.trainer import Trainer
 from src.utils.config import load_config

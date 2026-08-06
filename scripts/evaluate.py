@@ -1,25 +1,26 @@
 """
-Evaluate Entry Point
-====================
+Evaluate Script
+===============
 
-Standalone evaluation for a trained model.
+Standalone evaluation script for a trained model checkpoint.
 
 CLI::
 
-    python evaluate.py configs/resnet50.yaml
-    python evaluate.py configs/resnet50.yaml --checkpoint outputs/resnet50/best_model.pth
-
-Notebook::
-
-    from evaluate import evaluate
-    metrics = evaluate("configs/resnet50.yaml")
+    python scripts/evaluate.py configs/resnet50.yaml
+    python main.py evaluate configs/resnet50.yaml --split test
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Any, Dict, Optional
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import torch
 

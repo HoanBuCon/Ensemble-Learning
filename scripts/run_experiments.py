@@ -1,19 +1,14 @@
 """
-Multi-Experiment Runner
-=======================
+Multi-Experiment Runner Script
+==============================
 
 Train all configured models sequentially, cache predictions, and
 generate a comparison table for thesis analysis.
 
 CLI::
 
-    python run_experiments.py
-    python run_experiments.py --configs configs/resnet50.yaml configs/swin_tiny.yaml
-
-Output::
-
-    outputs/comparison_table.csv
-    outputs/comparison_accuracy.png
+    python scripts/run_experiments.py
+    python main.py benchmark --mode auto
 """
 
 from __future__ import annotations
@@ -26,16 +21,21 @@ import sys
 import time
 from typing import Any, Dict, List
 
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import pandas as pd
 
-from train import train as train_model
+from scripts.train import train as train_model
+from scripts.generate_comparison import generate_base_comparison_report
 from src.utils.report import (
     count_parameters,
     get_model_size_mb,
     extract_model_history_info,
     extract_model_val_metrics,
 )
-from src.utils.visualization import plot_comparison_bar
 
 
 def inspect_model_status(config_path: str) -> Dict[str, Any]:
@@ -276,7 +276,6 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
             traceback.print_exc()
 
     # Generate comparison report and visualization bar plots
-    from generate_comparison import generate_base_comparison_report
     df = generate_base_comparison_report(config_paths=config_paths)
     return df
 
