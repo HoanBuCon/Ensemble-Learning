@@ -11,6 +11,10 @@ Enterprise-grade PyTorch research framework designed for image classification an
 
 > 📖 **Detailed Architecture & Codebase Documentation**: See [docs/codebase_documentation.md](docs/codebase_documentation.md) for full module breakdowns, data flows, and technical specifications.
 
+<p align="center">
+  <img src="assets/potential_too_high.jpg" alt="Framework Overview" width="100%"/>
+</p>
+
 ### Key Features
 
 - **Config-Driven**: YAML files control every parameter (model, dataset, training, augmentations, checkpoints).
@@ -179,6 +183,10 @@ Create `configs/convnext_tiny.yaml` and run `python train.py configs/convnext_ti
 Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ nghiên cứu Phân loại ảnh và Học kết hợp (Ensemble Learning - Hard Voting, Soft Voting, Weighted Voting, Stacking). Khung làm việc được thiết kế theo kiến trúc mô-đun, đảm bảo tính tái lập (reproducibility) cao và điều khiển hoàn toàn bằng cấu hình (config-driven) dành cho khóa luận tốt nghiệp và các bài báo nghiên cứu.
 
 > 📖 **Tài liệu Chi tiết về Mã nguồn & Kiến trúc**: Xem tệp [docs/codebase_documentation.md](docs/codebase_documentation.md) để đọc phân tích chi tiết từng mô-đun, luồng thực thi dữ liệu và đặc tả kỹ thuật.
+
+<p align="center">
+  <img src="assets/tiem_nang_qua_lon.jpg" alt="Tổng quan Hệ thống" width="100%"/>
+</p>
 
 ### Tính năng chính
 
