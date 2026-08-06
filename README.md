@@ -131,15 +131,27 @@ python evaluate.py configs/resnet50.yaml --split test
 
 #### 6. Perform Ensemble Experiments
 
+Run automated ensemble evaluation across trained models:
+
+```bash
+# Mode 1: Validation Mode (Fast Prototyping ~30 sec)
+python run_ensemble_eval.py --mode val
+
+# Mode 2: Full 5-Fold OOF Mode (Gold-Standard Paper Quality ~10-13 hrs)
+python run_ensemble_eval.py --mode oof
+```
+
+*Or via Python API:*
+
 ```python
 import numpy as np
 from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsemble
 
 # Load probability predictions saved during evaluation
-p_resnet = np.load("outputs/resnet50/probabilities.npy")
-p_densenet = np.load("outputs/densenet121/probabilities.npy")
-p_swin = np.load("outputs/swin_tiny/probabilities.npy")
-labels = np.load("outputs/resnet50/labels.npy")
+p_resnet = np.load("outputs/resnet50/test_probabilities.npy")
+p_densenet = np.load("outputs/densenet121/test_probabilities.npy")
+p_swin = np.load("outputs/swin_tiny/test_probabilities.npy")
+labels = np.load("outputs/resnet50/test_labels.npy")
 
 probs = [p_resnet, p_densenet, p_swin]
 
@@ -158,7 +170,7 @@ print("Weighted Voting:", wv.evaluate(probs, labels))
 
 # Stacking Ensemble
 stacker = StackingEnsemble(meta_learner="logistic_regression")
-stacker.fit(probs, labels) # Best practice: fit on OOF probabilities
+stacker.fit(probs, labels) # Fit on OOF probabilities for leak-free evaluation
 print("Stacking:", stacker.evaluate(probs, labels))
 ```
 
@@ -304,15 +316,27 @@ python evaluate.py configs/resnet50.yaml --split test
 
 #### 6. Thử nghiệm kết hợp mô hình (Ensemble)
 
+Chạy đánh giá tự động tất cả các phương pháp Ensemble trên các mô hình đã huấn luyện:
+
+```bash
+# Chế độ 1: Validation Mode (Thử nghiệm & Kiểm tra code nhanh ~30 giây)
+python run_ensemble_eval.py --mode val
+
+# Chế độ 2: Full 5-Fold OOF Mode (Đánh giá chuẩn báo cáo luận văn / bài báo ~10-13 giờ)
+python run_ensemble_eval.py --mode oof
+```
+
+*Hoặc qua Python API:*
+
 ```python
 import numpy as np
 from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsemble
 
-# Tải xác suất dự đoán đã lưu sau quá trình đánh giá
-p_resnet = np.load("outputs/resnet50/probabilities.npy")
-p_densenet = np.load("outputs/densenet121/probabilities.npy")
-p_swin = np.load("outputs/swin_tiny/probabilities.npy")
-labels = np.load("outputs/resnet50/labels.npy")
+# Tải xác suất dự đoán đã lưu sau quá trình đánh giá (sử dụng tên tệp chuẩn hóa)
+p_resnet = np.load("outputs/resnet50/test_probabilities.npy")
+p_densenet = np.load("outputs/densenet121/test_probabilities.npy")
+p_swin = np.load("outputs/swin_tiny/test_probabilities.npy")
+labels = np.load("outputs/resnet50/test_labels.npy")
 
 probs = [p_resnet, p_densenet, p_swin]
 
@@ -331,7 +355,7 @@ print("Weighted Voting:", wv.evaluate(probs, labels))
 
 # Stacking Ensemble
 stacker = StackingEnsemble(meta_learner="logistic_regression")
-stacker.fit(probs, labels) # Thực tế nên dùng xác suất OOF để fit
+stacker.fit(probs, labels) # Fit trên xác suất OOF để chống rò rỉ dữ liệu
 print("Stacking:", stacker.evaluate(probs, labels))
 ```
 

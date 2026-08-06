@@ -153,9 +153,32 @@ def run_ensemble_evaluation(mode: str = "interactive", outputs_dir: str = "outpu
         return pd.DataFrame()
 
     model_names = [os.path.basename(d) for d in model_dirs]
+
+    # Validate class_to_idx metadata across base models if available
+    import json
+    class_mappings = []
+    for d in model_dirs:
+        cmap_path = os.path.join(d, "class_to_idx.json")
+        if os.path.exists(cmap_path):
+            with open(cmap_path, "r", encoding="utf-8") as f:
+                class_mappings.append(json.load(f))
+    if class_mappings:
+        from src.ensemble.base import EnsembleBase
+        EnsembleBase.validate_class_mappings(class_mappings)
+        print("  [OK] Class mapping validation passed across all base models.")
+
+    def _load_npy(folder: str, filename: str, fallback_filename: str) -> np.ndarray:
+        p1 = os.path.join(folder, filename)
+        p2 = os.path.join(folder, fallback_filename)
+        if os.path.exists(p1):
+            return np.load(p1)
+        if os.path.exists(p2):
+            return np.load(p2)
+        raise FileNotFoundError(f"Neither '{p1}' nor '{p2}' exists in '{folder}'")
+
     # Base test predictions from fully-trained models (always used for Single Model baseline)
-    base_test_probs_list = [np.load(os.path.join(d, "probabilities.npy")) for d in model_dirs]
-    test_labels = np.load(os.path.join(model_dirs[0], "labels.npy"))
+    base_test_probs_list = [_load_npy(d, "test_probabilities.npy", "probabilities.npy") for d in model_dirs]
+    test_labels = _load_npy(model_dirs[0], "test_labels.npy", "labels.npy")
     # Ensemble test predictions — may be overridden by OOF-averaged predictions in oof mode
     ensemble_test_probs_list = base_test_probs_list
 
@@ -168,8 +191,8 @@ def run_ensemble_evaluation(mode: str = "interactive", outputs_dir: str = "outpu
     if mode == "val":
         print("--> Generating / Loading Validation predictions for training Meta-Learner...")
         generate_val_predictions_if_missing(model_dirs)
-        fit_probs_list = [np.load(os.path.join(d, "val_probabilities.npy")) for d in model_dirs]
-        fit_labels = np.load(os.path.join(model_dirs[0], "val_labels.npy"))
+        fit_probs_list = [_load_npy(d, "val_probabilities.npy", "val_probabilities.npy") for d in model_dirs]
+        fit_labels = _load_npy(model_dirs[0], "val_labels.npy", "val_labels.npy")
         print(f"Validation dataset size for fitting Meta-Learner: {len(fit_labels)} samples\n")
     else:  # mode == "oof"
         print("--> Running 5-Fold OOF Generator across all models...")
@@ -179,7 +202,7 @@ def run_ensemble_evaluation(mode: str = "interactive", outputs_dir: str = "outpu
         oof_test_probs_list = []
         for m_name in model_names:
             cfg_path = os.path.join("configs", f"{m_name}.yaml")
-            oof_gen = OOFGenerator(config_path=cfg_path, n_splits=5)
+            oof_gen = OOFGenerator(config_path=cfg_path, n_splits=5, split_seed=42)
             oof_probs, oof_lbls, oof_test_probs = oof_gen.generate()
             fit_probs_list.append(oof_probs)
             if oof_test_probs is not None:

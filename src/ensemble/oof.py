@@ -59,6 +59,7 @@ class OOFGenerator:
         self,
         config: ExperimentConfig | str,
         n_splits: int = 5,
+        split_seed: int = 42,
         output_dir: Optional[str] = None,
     ) -> None:
         if isinstance(config, str):
@@ -66,6 +67,7 @@ class OOFGenerator:
 
         self.config = config
         self.n_splits = n_splits
+        self.split_seed = split_seed
         self.device = torch.device(config.device)
         self.output_dir = output_dir or os.path.join(
             config.checkpoint.save_dir, "oof"
@@ -139,13 +141,14 @@ class OOFGenerator:
         oof_probabilities = np.zeros((num_samples, num_classes), dtype=np.float32)
         test_probabilities_list: List[np.ndarray] = []
 
+        # StratifiedKFold uses unified split_seed across all models for fold alignment
         skf = StratifiedKFold(
-            n_splits=self.n_splits, shuffle=True, random_state=cfg.seed
+            n_splits=self.n_splits, shuffle=True, random_state=self.split_seed
         )
 
         self.logger.info(
             f"Starting OOF generation: {self.n_splits} folds, "
-            f"{num_samples} samples, {num_classes} classes"
+            f"{num_samples} samples, {num_classes} classes (Split Seed: {self.split_seed})"
         )
 
         for fold_idx, (train_indices, val_indices) in enumerate(
@@ -154,6 +157,9 @@ class OOFGenerator:
             self.logger.info(
                 f"--- Fold {fold_idx + 1}/{self.n_splits} ---"
             )
+
+            # Seed model initialization and worker PRNG for deterministic fold training
+            set_seed(cfg.seed + fold_idx)
 
             # Create fold dataloaders
             train_subset = Subset(full_train_dataset, train_indices.tolist())
@@ -194,7 +200,7 @@ class OOFGenerator:
                 fold_idx=fold_idx,
             )
 
-            # Store OOF predictions
+            # Store OOF predictions directly by indices
             oof_probabilities[val_indices] = fold_probs
 
             # Test predictions for this fold
@@ -211,11 +217,16 @@ class OOFGenerator:
         if test_probabilities_list:
             test_probabilities = np.mean(test_probabilities_list, axis=0)
 
-        # Save OOF arrays
+        # Save OOF arrays and class_to_idx metadata
         np.save(os.path.join(self.output_dir, "oof_probabilities.npy"), oof_probabilities)
         np.save(os.path.join(self.output_dir, "oof_labels.npy"), all_labels)
         if test_probabilities is not None:
             np.save(os.path.join(self.output_dir, "test_probabilities.npy"), test_probabilities)
+
+        class_to_idx_path = os.path.join(self.output_dir, "class_to_idx.json")
+        import json
+        with open(class_to_idx_path, "w", encoding="utf-8") as f:
+            json.dump(full_train_dataset.class_to_idx, f, indent=2)
 
         self.logger.info(
             f"OOF generation complete. Files saved to: {self.output_dir}"

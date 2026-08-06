@@ -667,13 +667,20 @@ class Trainer:
             output_dir: Directory for .npy files. Defaults to checkpoint dir.
         """
         dl = dataloader or self.test_loader or self.val_loader
+        split_name = "test" if (dl == self.test_loader and self.test_loader is not None) else "val"
         out = output_dir or self.config.checkpoint.save_dir
+
+        dataset = getattr(dl, "dataset", None)
+        class_to_idx = getattr(dataset, "class_to_idx", None)
 
         logits, probs, preds, labels, _ = run_inference(
             self.model, dl, str(self.device)
         )
-        save_predictions(logits, probs, preds, labels, out)
-        self.logger.info(f"Predictions saved to {out}")
+        save_predictions(
+            logits, probs, preds, labels, out,
+            class_to_idx=class_to_idx, split=split_name,
+        )
+        self.logger.info(f"Predictions ({split_name} split) saved to {out}")
 
     def evaluate(
         self,
@@ -691,6 +698,7 @@ class Trainer:
             Metrics dictionary.
         """
         dl = dataloader or self.test_loader or self.val_loader
+        split_name = "test" if (dl == self.test_loader and self.test_loader is not None) else "val"
         out = output_dir or self.config.checkpoint.save_dir
 
         return evaluate_model(
@@ -699,6 +707,7 @@ class Trainer:
             class_names=self.class_names,
             output_dir=out,
             device=str(self.device),
+            split=split_name,
         )
 
     def load_best_model(self) -> None:

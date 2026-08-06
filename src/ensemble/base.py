@@ -27,6 +27,26 @@ class EnsembleBase(ABC):
     :meth:`evaluate` is provided for free.
     """
 
+    @staticmethod
+    def validate_class_mappings(class_mappings: List[Dict[str, int]]) -> bool:
+        """
+        Verify that all base models share an identical class_to_idx mapping.
+
+        Raises:
+            ValueError: If class mappings differ across models.
+        """
+        if not class_mappings:
+            return True
+        ref = class_mappings[0]
+        for i, cmap in enumerate(class_mappings[1:], start=1):
+            if cmap != ref:
+                raise ValueError(
+                    f"Class mapping mismatch detected across base models! "
+                    f"Model 0 has class_to_idx={ref}, "
+                    f"but Model {i} has class_to_idx={cmap}."
+                )
+        return True
+
     @abstractmethod
     def fit(
         self,

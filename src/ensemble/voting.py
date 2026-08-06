@@ -78,7 +78,8 @@ class HardVoting(EnsembleBase):
 
         # Majority vote along model axis
         result = scipy_mode(predictions, axis=0, keepdims=False)
-        return result.mode.astype(int)
+        mode_arr = np.asarray(result.mode).ravel()
+        return mode_arr.astype(int)
 
 
 class SoftVoting(EnsembleBase):
