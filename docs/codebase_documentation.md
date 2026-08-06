@@ -232,3 +232,4 @@ All components were systematically tested and verified:
    - `WeightedVoting`: Passed verification with grid-search weight optimization.
    - `StackingEnsemble`: Verified using Logistic Regression, Random Forest, and XGBoost.
 4. **Environment Isolation**: Virtual environment created with exact dependency constraints frozen into `requirements.txt`.
+5. **CUDA Acceleration Setup**: Explicit PyTorch CUDA index-url requirement documented to prevent CPU-only fallback (`pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124`).

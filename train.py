@@ -23,22 +23,19 @@ from src.engine.trainer import Trainer
 from src.utils.config import load_config
 
 
-def train(config_path: str) -> Dict[str, Any]:
+def train(config_path: str, resume: bool = False) -> Dict[str, Any]:
     """
     Train a model using the specified YAML configuration.
 
-    This is the primary entry point for both CLI and notebook usage.
-    After training, automatically evaluates on the test set (if available)
-    and saves all artifacts (checkpoints, history, predictions, plots).
-
     Args:
         config_path: Path to the YAML configuration file.
+        resume: If True, resumes training from last_model.pth if found.
 
     Returns:
         Dictionary with training results (best accuracy, timing, etc.).
     """
     config = load_config(config_path)
-    trainer = Trainer(config)
+    trainer = Trainer(config, resume=resume)
 
     # Train
     results = trainer.train()
@@ -55,9 +52,15 @@ def train(config_path: str) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python train.py <config_path>")
-        print("Example: python train.py configs/resnet50.yaml")
-        sys.exit(1)
+    import argparse
 
-    train(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Train a single model")
+    parser.add_argument("config", help="Path to YAML config file")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from last_model.pth if available",
+    )
+
+    args = parser.parse_args()
+    train(args.config, resume=args.resume)

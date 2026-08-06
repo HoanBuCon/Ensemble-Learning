@@ -39,7 +39,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -59,6 +60,40 @@ from src.utils.reproducibility import set_seed
 from src.utils.visualization import plot_training_curves
 
 
+def resolve_save_dir(base_save_dir: str, resume: bool = False) -> str:
+    """
+    Resolve the save directory for an experiment.
+
+    - If resuming: finds the latest existing save directory (e.g. outputs/resnet50 or outputs/resnet50_1).
+    - If training from scratch:
+      - If base_save_dir is empty or does not exist: returns base_save_dir.
+      - If base_save_dir contains existing run files: creates/returns base_save_dir_1, base_save_dir_2, etc.
+    """
+    if resume:
+        if not os.path.exists(base_save_dir):
+            return base_save_dir
+        counter = 1
+        latest_dir = base_save_dir
+        while True:
+            candidate = f"{base_save_dir}_{counter}"
+            if os.path.exists(candidate) and os.path.exists(os.path.join(candidate, "last_model.pth")):
+                latest_dir = candidate
+                counter += 1
+            else:
+                break
+        return latest_dir
+
+    if not os.path.exists(base_save_dir) or not os.listdir(base_save_dir):
+        return base_save_dir
+
+    counter = 1
+    while True:
+        candidate = f"{base_save_dir}_{counter}"
+        if not os.path.exists(candidate) or not os.listdir(candidate):
+            return candidate
+        counter += 1
+
+
 class Trainer:
     """
     Generic, config-driven trainer for any registered backbone.
@@ -69,14 +104,24 @@ class Trainer:
 
     Args:
         config: Either an :class:`ExperimentConfig` or a path to a YAML file.
+        resume: If True, resumes training from last_model.pth if found.
     """
 
-    def __init__(self, config: ExperimentConfig | str) -> None:
+    def __init__(
+        self,
+        config: ExperimentConfig | str,
+        resume: bool = False,
+    ) -> None:
         if isinstance(config, str):
             config = load_config(config)
 
         self.config = config
         self.device = torch.device(config.device)
+        self.is_resume = resume
+
+        # Auto-increment save directory for scratch runs to prevent overwriting old runs
+        self.save_dir = resolve_save_dir(config.checkpoint.save_dir, resume=self.is_resume)
+        self.config.checkpoint.save_dir = self.save_dir
 
         # Reproducibility
         set_seed(config.seed)
@@ -84,7 +129,7 @@ class Trainer:
         # Logger
         self.logger = setup_logger(
             config.experiment_name,
-            log_dir=config.checkpoint.save_dir if config.logging.console else None,
+            log_dir=self.save_dir if config.logging.console else None,
         )
 
         # Model
@@ -113,7 +158,7 @@ class Trainer:
 
         # Mixed precision
         self.use_amp = config.train.mixed_precision and self.device.type == "cuda"
-        self.scaler = GradScaler(enabled=self.use_amp)
+        self.scaler = GradScaler("cuda", enabled=self.use_amp)
 
         # Checkpoint manager
         self.ckpt_manager = CheckpointManager(
@@ -131,6 +176,7 @@ class Trainer:
                     "epoch", "train_loss", "train_accuracy",
                     "val_loss", "val_accuracy", "lr", "elapsed",
                 ],
+                resume=self.is_resume,
             )
 
         # TensorBoard
@@ -220,6 +266,45 @@ class Trainer:
             )
         return schedulers[name]()
 
+    def _restore_checkpoint(self) -> int:
+        """
+        Restore training state from last_model.pth if resuming.
+
+        Returns:
+            start_epoch (1-indexed).
+        """
+        last_ckpt_path = os.path.join(self.config.checkpoint.save_dir, "last_model.pth")
+        if not os.path.exists(last_ckpt_path):
+            self.logger.warning(
+                f"Resume requested but no last_model.pth found at '{last_ckpt_path}'. "
+                f"Starting training from scratch (Epoch 1)."
+            )
+            return 1
+
+        ckpt = self.ckpt_manager.load_last(device=str(self.device))
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt and self.optimizer is not None:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt and self.scheduler is not None:
+            self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "history" in ckpt and isinstance(ckpt["history"], dict):
+            self.history = ckpt["history"]
+
+        # Restore best metric value
+        best_ckpt_path = os.path.join(self.config.checkpoint.save_dir, "best_model.pth")
+        if os.path.exists(best_ckpt_path):
+            best_ckpt = self.ckpt_manager.load_best(device=str(self.device))
+            self.ckpt_manager.best_value = best_ckpt.get("best_value", self.ckpt_manager.best_value)
+            self._best_metric = self.ckpt_manager.best_value
+
+        last_epoch = ckpt.get("epoch", 0)
+        start_epoch = last_epoch + 1
+        self.logger.info(
+            f"Resuming training from epoch {start_epoch}/{self.config.train.epochs} "
+            f"(Restored last epoch {last_epoch}, best {self.config.checkpoint.monitor}: {self._best_metric:.4f})"
+        )
+        return start_epoch
+
     # ================================================================
     # Training Loop
     # ================================================================
@@ -233,6 +318,10 @@ class Trainer:
         """
         cfg = self.config
         total_epochs = cfg.train.epochs
+        start_epoch = 1
+
+        if self.is_resume:
+            start_epoch = self._restore_checkpoint()
 
         log_training_start(
             experiment_name=cfg.experiment_name,
@@ -244,9 +333,9 @@ class Trainer:
         )
 
         global_start = time.time()
-        best_epoch = 0
+        best_epoch = max(0, start_epoch - 1)
 
-        for epoch in range(1, total_epochs + 1):
+        for epoch in range(start_epoch, total_epochs + 1):
             epoch_start = time.time()
 
             # --- Learning rate warmup ---

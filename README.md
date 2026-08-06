@@ -67,9 +67,17 @@ python -m venv venv
 # On Linux/macOS:
 source venv/bin/activate
 
-# Install requirements
+# Install PyTorch with CUDA support (Recommended for NVIDIA GPUs, e.g. CUDA 12.4)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Install other requirements
 pip install -r requirements.txt
+
+# Verify CUDA GPU acceleration
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
+
+> ⚠️ **Note on PyTorch CUDA**: Ensure you install the PyTorch build matching your installed CUDA toolkit version (e.g. `cu124`, `cu121`). Running on CPU will slow down training significantly.
 
 #### 2. Prepare Dataset
 
@@ -228,9 +236,17 @@ python -m venv venv
 # Trên Linux/macOS:
 source venv/bin/activate
 
-# Cài đặt các thư viện cần thiết
+# Cài đặt PyTorch hỗ trợ GPU CUDA (Khuyên dùng cho card NVIDIA, VD: CUDA 12.4)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Cài đặt các thư viện cần thiết còn lại
 pip install -r requirements.txt
+
+# Kiểm tra GPU đã nhận diện chưa
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
+
+> ⚠️ **LƯU Ý VỀ CUDA**: Hãy đảm bảo bạn cài đặt phiên bản PyTorch khớp với phiên bản CUDA Toolkit trên máy của bạn (VD: `cu124`, `cu121`). Nếu chạy trên CPU (`CUDA available: False`), tốc độ huấn luyện sẽ chậm hơn hàng chục lần.
 
 #### 2. Chuẩn bị dữ liệu
 

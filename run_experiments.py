@@ -52,20 +52,143 @@ def get_model_size_mb(save_dir: str) -> float:
     return 0.0
 
 
-def run_experiments(config_paths: List[str]) -> pd.DataFrame:
+def inspect_model_status(config_path: str) -> Dict[str, Any]:
+    """
+    Inspect the training status of a model from its output directory.
+
+    Returns:
+        Dict with status ('COMPLETED', 'RESUMABLE', 'NOT_STARTED'), last_epoch,
+        total_epochs, and save_dir.
+    """
+    from src.utils.config import load_config
+    import torch
+
+    cfg = load_config(config_path)
+    save_dir = cfg.checkpoint.save_dir
+    total_epochs = cfg.train.epochs
+    metrics_path = os.path.join(save_dir, "metrics.json")
+    last_ckpt_path = os.path.join(save_dir, "last_model.pth")
+
+    if os.path.exists(metrics_path):
+        return {
+            "config_path": config_path,
+            "model_name": cfg.model.name,
+            "experiment_name": cfg.experiment_name,
+            "status": "COMPLETED",
+            "last_epoch": total_epochs,
+            "total_epochs": total_epochs,
+            "save_dir": save_dir,
+        }
+
+    if os.path.exists(last_ckpt_path):
+        try:
+            ckpt = torch.load(last_ckpt_path, map_location="cpu", weights_only=False)
+            last_epoch = ckpt.get("epoch", 0)
+            return {
+                "config_path": config_path,
+                "model_name": cfg.model.name,
+                "experiment_name": cfg.experiment_name,
+                "status": "RESUMABLE",
+                "last_epoch": last_epoch,
+                "total_epochs": total_epochs,
+                "save_dir": save_dir,
+            }
+        except Exception:
+            pass
+
+    return {
+        "config_path": config_path,
+        "model_name": cfg.model.name,
+        "experiment_name": cfg.experiment_name,
+        "status": "NOT_STARTED",
+        "last_epoch": 0,
+        "total_epochs": total_epochs,
+        "save_dir": save_dir,
+    }
+
+
+def display_status_table(statuses: List[Dict[str, Any]]) -> None:
+    """Display a Rich table of model training statuses."""
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(
+        title="[bold white]Experiment Status Overview[/bold white]",
+        header_style="bold cyan",
+        border_style="bright_blue",
+    )
+    table.add_column("Model Name", style="bold white")
+    table.add_column("Config Path", style="dim white")
+    table.add_column("Status", justify="center")
+    table.add_column("Progress", justify="right")
+    table.add_column("Action", style="dim white")
+
+    for s in statuses:
+        status_str = s["status"]
+        if status_str == "COMPLETED":
+            status_style = "[bold green]COMPLETED[/bold green]"
+            action_style = "Skip (Already evaluated)"
+            progress_str = f"{s['last_epoch']}/{s['total_epochs']}"
+        elif status_str == "RESUMABLE":
+            status_style = "[bold yellow]RESUMABLE[/bold yellow]"
+            action_style = f"Resume at Epoch {s['last_epoch'] + 1}"
+            progress_str = f"{s['last_epoch']}/{s['total_epochs']}"
+        else:
+            status_style = "[dim white]NOT STARTED[/dim white]"
+            action_style = "Train from scratch (Epoch 1)"
+            progress_str = f"0/{s['total_epochs']}"
+
+        table.add_row(
+            s["model_name"],
+            s["config_path"],
+            status_style,
+            progress_str,
+            action_style,
+        )
+
+    console.print(table)
+    console.print()
+
+
+def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame:
     """
     Train all models and generate a comparison table.
 
     Args:
         config_paths: List of YAML config file paths.
+        mode: Training mode ('scratch', 'resume', 'auto').
 
     Returns:
         DataFrame with the comparison table.
     """
     results_list: List[Dict[str, Any]] = []
 
+    statuses = [inspect_model_status(p) for p in config_paths]
+    display_status_table(statuses)
+
+    # Determine mode if interactive
+    has_resumable = any(s["status"] == "RESUMABLE" for s in statuses)
+
+    if mode == "auto" and has_resumable:
+        print("Interrupted experiments detected!")
+        print("  [1] Resume interrupted experiments (Recommended)")
+        print("  [2] Train all from scratch")
+        try:
+            choice = input("Select mode [1/2] (default: 1): ").strip()
+            if choice == "2":
+                mode = "scratch"
+            else:
+                mode = "resume"
+        except (KeyboardInterrupt, EOFError):
+            mode = "resume"
+    elif mode == "auto":
+        mode = "scratch"
+
+    is_resume_mode = (mode == "resume")
+
     print(f"\n{'='*60}")
-    print(f"  Running {len(config_paths)} experiments")
+    print(f"  Running {len(config_paths)} experiments (Mode: {mode.upper()})")
     print(f"{'='*60}\n")
 
     for i, config_path in enumerate(config_paths):
@@ -76,7 +199,7 @@ def run_experiments(config_paths: List[str]) -> pd.DataFrame:
         start_time = time.time()
 
         try:
-            result = train_model(config_path)
+            result = train_model(config_path, resume=is_resume_mode)
             total_time = time.time() - start_time
 
             eval_metrics = result.get("eval_metrics", {})
@@ -101,7 +224,6 @@ def run_experiments(config_paths: List[str]) -> pd.DataFrame:
                 ),
             }
 
-            # Try to get model size from config
             from src.utils.config import load_config
             cfg = load_config(config_path)
             row["Model_Size_MB"] = get_model_size_mb(cfg.checkpoint.save_dir)
@@ -121,23 +243,19 @@ def run_experiments(config_paths: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(results_list)
 
     if len(df) > 0:
-        # Sort by accuracy
         df = df.sort_values("Accuracy", ascending=False).reset_index(drop=True)
 
-        # Save comparison table
         output_dir = "./outputs"
         os.makedirs(output_dir, exist_ok=True)
 
         csv_path = os.path.join(output_dir, "comparison_table.csv")
         df.to_csv(csv_path, index=False)
 
-        # Save as formatted markdown (useful for thesis)
         md_path = os.path.join(output_dir, "comparison_table.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("# Model Comparison Results\n\n")
             f.write(df.to_markdown(index=False))
 
-        # Generate comparison plots
         metrics_dict = {}
         for _, row in df.iterrows():
             metrics_dict[row["Model"]] = {
@@ -150,7 +268,6 @@ def run_experiments(config_paths: List[str]) -> pd.DataFrame:
         for metric in ["accuracy", "precision", "recall", "f1_score"]:
             plot_comparison_bar(metrics_dict, metric, output_dir)
 
-        # Print summary table
         print(f"\n\n{'='*60}")
         print("  EXPERIMENT COMPARISON SUMMARY")
         print(f"{'='*60}\n")
@@ -184,6 +301,12 @@ if __name__ == "__main__":
         default=None,
         help="List of config files. Defaults to all configs/*.yaml",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["scratch", "resume", "auto"],
+        default="auto",
+        help="Training mode: 'scratch' (train from epoch 1), 'resume' (continue interrupted runs), 'auto' (prompt or auto-detect)",
+    )
     args = parser.parse_args()
 
     if args.configs:
@@ -195,4 +318,4 @@ if __name__ == "__main__":
         print("No config files found. Provide --configs or add files to configs/")
         sys.exit(1)
 
-    run_experiments(config_paths)
+    run_experiments(config_paths, mode=args.mode)

@@ -210,14 +210,20 @@ class CSVLogger:
         fieldnames: List of column names.
     """
 
-    def __init__(self, filepath: str, fieldnames: List[str]) -> None:
+    def __init__(
+        self,
+        filepath: str,
+        fieldnames: List[str],
+        resume: bool = False,
+    ) -> None:
         self.filepath = filepath
         self.fieldnames = fieldnames
 
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-        with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+        if not (resume and os.path.exists(filepath)):
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
 
     def log(self, row: Dict[str, Any]) -> None:
         """Append a row to the CSV file."""

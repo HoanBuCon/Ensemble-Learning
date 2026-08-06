@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
@@ -246,7 +247,7 @@ class OOFGenerator:
         )
 
         use_amp = cfg.mixed_precision and self.device.type == "cuda"
-        scaler = GradScaler(enabled=use_amp)
+        scaler = GradScaler("cuda", enabled=use_amp)
 
         best_val_acc = 0.0
         best_state = None
