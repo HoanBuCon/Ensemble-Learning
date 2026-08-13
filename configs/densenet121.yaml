@@ -8,7 +8,6 @@ seed: 42
 model:
   name: densenet121
   pretrained: true
-  num_classes: 6
   drop_rate: 0.0
 
 data:

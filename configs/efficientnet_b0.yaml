@@ -8,7 +8,6 @@ seed: 42
 model:
   name: efficientnet_b0
   pretrained: true
-  num_classes: 6
   drop_rate: 0.2
 
 data:

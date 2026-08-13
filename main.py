@@ -236,6 +236,16 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         help="Optional list of YAML config files to inspect",
     )
 
+    # 7. Serve Subcommand (FastAPI Web Server)
+    serve_parser = subparsers.add_parser(
+        "serve",
+        aliases=["api", "server"],
+        help="Start FastAPI REST API & Web Dashboard server on localhost:8000",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host address (default: 127.0.0.1)")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Port number (default: 8000)")
+    serve_parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+
     return parser
 
 
@@ -279,16 +289,159 @@ def prompt_base_models_training(outputs_dir: str = "outputs") -> str:
     return "auto"
 
 
+def select_menu_option(options: List[str], header_title: str) -> int:
+    """
+    Interactive menu selector allowing navigation via:
+    - Arrow Keys (Up/Down) + Enter
+    - Direct Number Keys (1, 2, 3...)
+    - Ctrl+C to cancel
+    """
+    import os
+    import sys
+
+    if os.name == "nt":
+        try:
+            import msvcrt
+            selected_idx = 0
+            while True:
+                os.system("cls" if os.name == "nt" else "clear")
+                print("\n" + "=" * 80)
+                print(f"  {header_title}")
+                print("=" * 80)
+                print("  Navigation: Use [↑/↓] Arrow Keys + ENTER, or press Number Keys [1-{}]:\n".format(len(options)))
+
+                for i, opt in enumerate(options):
+                    if i == selected_idx:
+                        print(f"  👉 \033[1;36m[{i+1}] {opt}\033[0m")
+                    else:
+                        print(f"     [{i+1}] {opt}")
+
+                print("\n" + "-" * 80)
+
+                ch = msvcrt.getch()
+                if ch in (b"\x00", b"\xe0"):
+                    arrow = msvcrt.getch()
+                    if arrow == b"H":  # Up key
+                        selected_idx = (selected_idx - 1) % len(options)
+                    elif arrow == b"P":  # Down key
+                        selected_idx = (selected_idx + 1) % len(options)
+                elif ch in (b"\r", b"\n"):  # Enter key
+                    return selected_idx
+                elif ch.isdigit():
+                    num = int(ch.decode("ascii"))
+                    if 1 <= num <= len(options):
+                        return num - 1
+                elif ch == b"\x03":  # Ctrl+C
+                    raise KeyboardInterrupt
+        except Exception:
+            pass
+
+    # Fallback standard input prompt for non-interactive environments
+    print("\n" + "=" * 80)
+    print(f"  {header_title}")
+    print("=" * 80)
+    for i, opt in enumerate(options):
+        print(f"  [{i+1}] {opt}")
+    print("-" * 80)
+
+    while True:
+        try:
+            choice = input(f"Select option [1-{len(options)}]: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                return int(choice) - 1
+        except (KeyboardInterrupt, EOFError):
+            raise KeyboardInterrupt
+
+
+def run_interactive_cli_menu() -> None:
+    """Run interactive menu loop for Master CLI."""
+    menu_options = [
+        "🚀 Run Full End-to-End Pipeline (Train Base -> Report -> Ensemble)",
+        "🏋️ Train a Single Backbone Model (ResNet-50 / DenseNet-121 / EfficientNet-B0 / Swin-Tiny)",
+        "⚡ Run Ensemble Benchmark Evaluation (Voting & Stacking Meta-Learners)",
+        "🌐 Start FastAPI Web Server & Visualizer Dashboard (http://127.0.0.1:8000)",
+        "🔬 Evaluate Trained Model Checkpoint on Test/Val Split",
+        "📊 Re-generate Comparison Tables & Benchmark Plots",
+        "❌ Exit CLI",
+    ]
+
+    while True:
+        try:
+            choice_idx = select_menu_option(
+                menu_options,
+                "TEA LEAF ENSEMBLE PIPELINE - INTERACTIVE MASTER CLI CONTROLLER",
+            )
+
+            if choice_idx == 0:
+                train_mode = prompt_base_models_training()
+                ensemble_mode = prompt_ensemble_mode()
+                config_paths = resolve_config_paths(None)
+                run_experiments(config_paths, mode=train_mode)
+                run_ensemble_evaluation(mode=ensemble_mode, outputs_dir="outputs")
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 1:
+                configs = sorted(glob.glob("configs/*.yaml"))
+                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                cfg_options = [f"{os.path.basename(c).replace('.yaml','').upper()} ({c})" for c in configs]
+                cfg_idx = select_menu_option(cfg_options, "SELECT BACKBONE MODEL TO TRAIN")
+                target_cfg = configs[cfg_idx]
+                resume_choice = select_menu_option(
+                    ["Auto-resume / Scratch mode [Default]", "Force resume from last_model.pth"],
+                    f"TRAINING OPTIONS: {target_cfg}",
+                )
+                run_train(target_cfg, resume=(resume_choice == 1))
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 2:
+                mode = prompt_ensemble_mode()
+                run_ensemble_evaluation(mode=mode, outputs_dir="outputs")
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 3:
+                import uvicorn
+                print("\nStarting FastAPI Web Server on http://127.0.0.1:8000 ...\n")
+                uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=False)
+
+            elif choice_idx == 4:
+                configs = sorted(glob.glob("configs/*.yaml"))
+                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                cfg_options = [f"{os.path.basename(c).replace('.yaml','').upper()} ({c})" for c in configs]
+                cfg_idx = select_menu_option(cfg_options, "SELECT MODEL TO EVALUATE")
+                target_cfg = configs[cfg_idx]
+                split_idx = select_menu_option(["Test Split (Default)", "Validation Split"], "SELECT DATASET SPLIT")
+                split_name = "test" if split_idx == 0 else "val"
+                run_evaluate(target_cfg, checkpoint_path=None, split=split_name)
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 5:
+                generate_base_comparison_report(outputs_dir="outputs", config_paths=None)
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 6:
+                print("\nExiting Interactive Master CLI. Goodbye!\n")
+                break
+
+        except KeyboardInterrupt:
+            print("\nExiting Interactive Master CLI. Goodbye!\n")
+            break
+
+
 def main() -> None:
     """Main CLI execution handler."""
     parser = build_parser()
     args = parser.parse_args()
 
     if args.command is None:
-        parser.print_help()
+        run_interactive_cli_menu()
         sys.exit(0)
 
-    if args.command in ["train", "train-single"]:
+    if args.command in ["serve", "api", "server"]:
+        import uvicorn
+        print(f"\nStarting FastAPI Web Server on http://{args.host}:{args.port} ...\n")
+        uvicorn.run("server:app", host=args.host, port=args.port, reload=args.reload)
+
+    elif args.command in ["train", "train-single"]:
         run_train(args.config, resume=args.resume)
 
     elif args.command == "evaluate":

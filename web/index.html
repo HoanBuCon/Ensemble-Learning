@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tea Leaf Ensemble & Multi-Model AI Pipeline</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1>Tea Leaf AI Inference & Ensemble Pipeline</h1>
+                <p>Multi-Image Classification with 5 Flexible Base & Ensemble Benchmark Modes</p>
+            </div>
+            <div class="header-buttons">
+                <button type="button" class="analytics-toggle-btn" id="analyticsToggleBtn">
+                    <i class="fa-solid fa-chart-column"></i> Analytics
+                </button>
+                <button type="button" class="theme-toggle-btn" id="themeToggleBtn">
+                    <span id="themeIcon"><i class="fa-solid fa-moon"></i></span>
+                    <span id="themeText">Dark Mode</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Collapsible Analytics Drawer Section -->
+        <div class="analytics-drawer glass-panel" id="analyticsSection" style="display: none;">
+            <div class="analytics-drawer-header">
+                <div>
+                    <h3 style="font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
+                        <i class="fa-solid fa-chart-line" style="color: var(--accent-color);"></i>
+                        Model Benchmark Analytics & Comparison Charts
+                    </h3>
+                    <p style="font-size: 0.82rem; color: var(--text-secondary); font-family: var(--font-tech); margin-top: 0.2rem;">Comprehensive performance metrics & epoch history training curves</p>
+                </div>
+                
+                <div class="analytics-header-actions">
+                    <div class="analytics-tab-buttons" id="analyticsTabGroup">
+                        <button type="button" class="analytics-tab-btn active" data-tab="base_models">
+                            <i class="fa-solid fa-brain"></i> Base Models (4)
+                        </button>
+                        <button type="button" class="analytics-tab-btn" data-tab="ensemble_methods">
+                            <i class="fa-solid fa-network-wired"></i> Ensemble Methods (6)
+                        </button>
+                    </div>
+
+                    <button type="button" class="analytics-close-btn" id="analyticsCloseBtn">
+                        <i class="fa-solid fa-xmark"></i> Close
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tab 1: Base Models Analytics -->
+            <div id="analyticsTabBaseModels">
+                <div class="analytics-grid">
+                    <!-- Chart Card 1: Base Benchmark Metrics Bar Chart -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-square-poll-vertical" style="color: var(--cyan-color);"></i>
+                            Base Model Performance Metrics (%)
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartBenchmark"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card 2: Training Epoch Loss Curves -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-arrow-trend-down" style="color: var(--accent-color);"></i>
+                            Training vs Validation Loss History
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartLossHistory"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card 3: Per-Class Metric Breakdown -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-header">
+                            <div class="chart-card-title" style="margin-bottom: 0;">
+                                <i class="fa-solid fa-layer-group" style="color: var(--purple-color);"></i>
+                                <span id="perClassChartTitle">Per-Class Disease F1-Score Comparison Across Models (%)</span>
+                            </div>
+                            <div class="metric-pill-group" id="perClassMetricGroup">
+                                <button type="button" class="metric-pill active" data-metric="f1_score">F1-Score</button>
+                                <button type="button" class="metric-pill" data-metric="precision">Precision</button>
+                                <button type="button" class="metric-pill" data-metric="recall">Recall</button>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartPerClass"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Ensemble Methods Analytics -->
+            <div id="analyticsTabEnsembleMethods" style="display: none;">
+                <div class="analytics-grid">
+                    <!-- Chart Card 1: Ensemble Performance Metrics -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-cubes" style="color: var(--cyan-color);"></i>
+                            Ensemble Methods Performance Metrics (%)
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartEnsembleBenchmark"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card 2: Accuracy Gain vs Best Base Model -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-arrow-up-right-dots" style="color: var(--emerald-color, #10b981);"></i>
+                            Accuracy Gain Over Best Single Model (+%)
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartEnsembleGain"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card 3: Ensemble Per-Class Metric Breakdown -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-header">
+                            <div class="chart-card-title" style="margin-bottom: 0;">
+                                <i class="fa-solid fa-layer-group" style="color: var(--purple-color);"></i>
+                                <span id="ensPerClassChartTitle">Per-Class Disease F1-Score Comparison Across Ensemble Methods (%)</span>
+                            </div>
+                            <div class="metric-pill-group" id="ensPerClassMetricGroup">
+                                <button type="button" class="metric-pill active" data-metric="f1_score">F1-Score</button>
+                                <button type="button" class="metric-pill" data-metric="precision">Precision</button>
+                                <button type="button" class="metric-pill" data-metric="recall">Recall</button>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartEnsemblePerClass"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card 4: Base Models vs Ensemble Top Comparison -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-ranking-star" style="color: #f59e0b;"></i>
+                            Best Base Model vs Best Ensemble Method Benchmark Comparison (%)
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartBaseVsEnsemble"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-layout">
+            <div class="glass-panel sticky-panel" id="controlPanel">
+                <div class="panel-header-toggle" id="panelHeaderToggle">
+                    <span class="panel-header-title">
+                        <i class="fa-solid fa-sliders" style="color: var(--accent-color); margin-right: 0.4rem;"></i>
+                        Select Classification Mode & Upload
+                    </span>
+                    <span class="panel-toggle-icon">
+                        <i class="fa-solid fa-chevron-down"></i>
+                    </span>
+                </div>
+                <form id="pipelineForm" class="panel-content">
+                    <div class="form-group">
+                        <label style="font-weight: 600; margin-bottom: 0.75rem; display: block;">Select Classification Mode</label>
+                        
+                        <div class="mode-selector-tabs">
+                            <!-- Mode 1 -->
+                            <label class="mode-option active">
+                                <input type="radio" name="mode_type" value="single_base" checked>
+                                <div>
+                                    <div class="mode-title">1. Single Base Model</div>
+                                    <div class="mode-desc">Run inference on a single backbone model</div>
+                                </div>
+                            </label>
+                            <div class="sub-select-box" id="subBaseBox" style="display: block;">
+                                <div class="custom-dropdown" id="customBaseDropdown">
+                                    <div class="custom-dropdown-trigger">
+                                        <span class="custom-dropdown-text">ResNet-50 Baseline</span>
+                                        <span class="custom-dropdown-arrow"><i class="fa-solid fa-chevron-down"></i></span>
+                                    </div>
+                                    <div class="custom-dropdown-menu">
+                                        <div class="custom-dropdown-item selected" data-value="resnet50">ResNet-50 Baseline</div>
+                                        <div class="custom-dropdown-item" data-value="densenet121">DenseNet-121</div>
+                                        <div class="custom-dropdown-item" data-value="efficientnet_b0">EfficientNet-B0</div>
+                                        <div class="custom-dropdown-item" data-value="swin_tiny">Swin Transformer Tiny</div>
+                                    </div>
+                                    <input type="hidden" id="singleBaseSelect" value="resnet50">
+                                </div>
+                            </div>
+
+                            <!-- Mode 2 -->
+                            <label class="mode-option">
+                                <input type="radio" name="mode_type" value="all_base">
+                                <div>
+                                    <div class="mode-title">2. All Base Models</div>
+                                    <div class="mode-desc">Simultaneous comparison across all 4 backbones</div>
+                                </div>
+                            </label>
+
+                            <!-- Mode 3 -->
+                            <label class="mode-option">
+                                <input type="radio" name="mode_type" value="single_ensemble">
+                                <div>
+                                    <div class="mode-title">3. Single Ensemble Method</div>
+                                    <div class="mode-desc">Run a specific Voting or Stacking method</div>
+                                </div>
+                            </label>
+                            <div class="sub-select-box" id="subEnsembleBox">
+                                <div class="custom-dropdown" id="customEnsembleDropdown">
+                                    <div class="custom-dropdown-trigger">
+                                        <span class="custom-dropdown-text">Soft Voting (Probability Averaging)</span>
+                                        <span class="custom-dropdown-arrow"><i class="fa-solid fa-chevron-down"></i></span>
+                                    </div>
+                                    <div class="custom-dropdown-menu">
+                                        <div class="custom-dropdown-item selected" data-value="soft_voting">Soft Voting (Probability Averaging)</div>
+                                        <div class="custom-dropdown-item" data-value="hard_voting">Hard Voting (Majority Vote)</div>
+                                        <div class="custom-dropdown-item" data-value="weighted_voting">Weighted Voting Ensemble</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_logistic">Stacking (Logistic Regression)</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_rf">Stacking (Random Forest)</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_xgb">Stacking (XGBoost)</div>
+                                    </div>
+                                    <input type="hidden" id="singleEnsembleSelect" value="soft_voting">
+                                </div>
+                            </div>
+
+                            <!-- Mode 4 -->
+                            <label class="mode-option">
+                                <input type="radio" name="mode_type" value="all_ensemble">
+                                <div>
+                                    <div class="mode-title">4. All Ensemble Methods</div>
+                                    <div class="mode-desc">Simultaneous comparison across 6 ensemble methods</div>
+                                </div>
+                            </label>
+
+                            <!-- Mode 5 -->
+                            <label class="mode-option">
+                                <input type="radio" name="mode_type" value="all_all">
+                                <div>
+                                    <div class="mode-title">5. Full Benchmark (All Base + All Ensemble)</div>
+                                    <div class="mode-desc">Complete comparison across all 10 algorithms</div>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="font-weight: 600; margin-bottom: 0.5rem; display: block;">Upload Images (Multi-Select & Ctrl+V Paste Allowed)</label>
+                        <div class="upload-dropzone" id="dropzone">
+                            <span class="upload-icon"><i class="fa-solid fa-cloud-arrow-up"></i></span>
+                            <p style="font-weight: 500;">Drag & drop, click, or press <b style="color: #818cf8;">Ctrl + V</b> to paste image</p>
+                            <p style="font-size: 0.85rem; color: var(--text-secondary);">Supports multiple screenshots & copied images</p>
+                            <input type="file" id="fileInput" multiple accept="image/*" style="display: none;">
+                        </div>
+                        <p id="fileCount" style="font-size: 0.85rem; color: #a5b4fc; margin-top: 0.5rem; text-align: center; display: none;"></p>
+                    </div>
+
+                    <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+                        <button type="submit" class="btn-run" id="btnRun" disabled>Run Classification Pipeline</button>
+                        <button type="button" class="btn-clear" id="btnClear">
+                            <i class="fa-solid fa-trash-can"></i> Clear
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="glass-panel">
+                <div class="results-header">
+                    <h2>Inference Results</h2>
+                    <span class="badge" id="badgeStats">0 Images</span>
+                </div>
+
+                <div id="resultsContainer">
+                    <p style="color: var(--text-secondary); text-align: center; padding: 4rem 0;">
+                        Select a mode, upload images, and click "Run Classification Pipeline" to view real-time results.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

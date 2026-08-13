@@ -7,9 +7,9 @@
 <a name="english"></a>
 ## English
 
-Enterprise-grade PyTorch research framework designed for image classification and Ensemble Learning research (Hard Voting, Soft Voting, Weighted Voting, Stacking). Built with modular architecture, strict reproducibility, and full configuration drive for academic research and thesis work.
+Enterprise-grade PyTorch research framework designed for image classification, Ensemble Learning research (Hard Voting, Soft Voting, Weighted Voting, Stacking), and real-time multi-image REST API deployment. Built with modular architecture, strict reproducibility, full configuration drive, and clean decoupled Web Architecture for academic research, thesis work, and web deployment.
 
-> 📖 **Detailed Architecture & Codebase Documentation**: See [docs/codebase_documentation.md](docs/codebase_documentation.md) for full module breakdowns, data flows, and technical specifications.
+> 📖 **Detailed Architecture & Codebase Documentation**: See [docs/codebase_documentation.md](docs/codebase_documentation.md) for full module breakdowns, data flows, REST API endpoints, and technical specifications.
 
 <p align="center">
   <img src="assets/potential_too_high.jpg" alt="Framework Overview" width="100%"/>
@@ -17,24 +17,34 @@ Enterprise-grade PyTorch research framework designed for image classification an
 
 ### Key Features
 
-- **Config-Driven**: YAML files control every parameter (model, dataset, training, augmentations, checkpoints).
-- **Model Factory**: Registry pattern allows adding backbones (ResNet, DenseNet, EfficientNet, Swin Transformer, ConvNeXt, etc.) via a simple decorator.
-- **Generic Trainer**: A single unified trainer supporting Mixed Precision (AMP), gradient clipping, gradient accumulation, learning rate scheduling with warmup, early stopping, and automatic checkpointing.
+- **Centralized Dataset Registry (`configs/dataset.yaml`)**: Single Source of Truth for dataset metadata, class names, directory paths, and display names with zero hardcoded class names in python code.
+- **Config-Driven Architecture**: YAML files control every parameter (model, dataset, training, augmentations, checkpoints). Backbone model YAMLs dynamically inherit `num_classes` from `dataset.yaml`.
+- **Model Factory**: Registry pattern allows adding backbones (ResNet, DenseNet, EfficientNet, Swin Transformer, ConvNeXt, etc.) via a simple decorator (`@register_model`).
+- **Generic Trainer**: Unified trainer supporting Mixed Precision (AMP), gradient clipping, gradient accumulation, learning rate scheduling with warmup, early stopping, and automatic checkpointing.
 - **Ensemble Learning Module**: Independent numpy-based module supporting:
   - Hard Voting (Majority Vote)
   - Soft Voting (Probability Averaging)
-  - Weighted Voting (Automated grid-search optimization)
-  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) with Out-of-Fold (OOF) prediction generation to prevent data leakage.
-- **Unified Master CLI (`main.py`)**: Centralized command-line entrypoint for orchestrating training, evaluation, benchmarking, ensemble, and reporting.
-- **Reproducibility**: Global seed management, deterministic CUDA operations, and seeded DataLoaders.
-- **Platform Agnostic**: Runs seamlessly on local machines (Windows/Linux/macOS), Kaggle, and Google Colab.
+  - Weighted Voting (Automated grid-search weight optimization)
+  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) with Out-of-Fold (OOF) prediction generation to eliminate data leakage.
+- **FastAPI Web Server & REST API (`server.py`)**: High-performance backend inference server with batch processing, dynamic `dataset_info` serving, and lazy model weight caching.
+- **Interactive Web Dashboard Analytics**:
+  - `Base Models (4)` Tab & `Ensemble Methods (6)` Tab.
+  - Per-Class Disease Breakdown Charts for both Base Models and Ensemble Methods with interactive metric pills (`F1-Score`, `Precision`, `Recall`).
+  - Active glowing state UI/UX for Analytics toggle button.
+- **Unified Interactive Master CLI (`main.py`)**: Terminal controller with Angular CLI-style menu (`↑/↓` arrow key & number key navigation) or direct subcommand flags (`all-in-one`, `train`, `ensemble`, `serve`, `report`).
 
 ### Project Structure
 
 ```
 pipeline/
-├── main.py                   # Master CLI controller
+├── main.py                   # Master CLI controller (Interactive menu & subcommands)
+├── server.py                 # FastAPI REST API & Inference Server
+├── web/                      # Clean Decoupled Frontend Web Assets
+│   ├── index.html            # Dashboard HTML structure
+│   ├── styles.css            # Dark mode glassmorphism stylesheet & active button glow
+│   └── app.js                # Frontend JS logic (Upload, Ctrl+V Paste, Charts, API Fetch)
 ├── configs/                  # YAML configuration files
+│   ├── dataset.yaml          # Centralized Dataset Registry (classes, display names, paths)
 │   ├── resnet50.yaml
 │   ├── densenet121.yaml
 │   ├── efficientnet_b0.yaml
@@ -50,9 +60,11 @@ pipeline/
 │   ├── models/               # ModelFactory with backbone registrations
 │   ├── engine/               # Generic Trainer, Evaluator, & CheckpointManager
 │   ├── ensemble/             # Voting, Stacking, and OOF Generators
-│   └── utils/                # Config parser, Logger, Metrics, Visualization, & Reports
+│   └── utils/                # Config parser, Logger, Metrics, Report, & Visualization
 ├── requirements.txt          # Frozen dependencies
-└── README.md
+├── README.md                 # Bilingual documentation (English & Tiếng Việt)
+└── docs/
+    └── codebase_documentation.md # Exhaustive technical reference document
 ```
 
 ### Supported Models
@@ -79,14 +91,12 @@ source venv/bin/activate
 # Install PyTorch with CUDA support (Recommended for NVIDIA GPUs, e.g. CUDA 12.4)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# Install other requirements
+# Install other requirements (including FastAPI & Uvicorn)
 pip install -r requirements.txt
 
 # Verify CUDA GPU acceleration
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
-
-> ⚠️ **Note on PyTorch CUDA**: Ensure you install the PyTorch build matching your installed CUDA toolkit version (e.g. `cu124`, `cu121`). Running on CPU will slow down training significantly.
 
 #### 2. Prepare Dataset
 
@@ -106,11 +116,15 @@ data/
     └── ...
 ```
 
-#### 3. Master CLI Controller (`main.py`)
+#### 3. Master CLI Controller (`main.py`) & Web Server
 
 Use `python main.py` as the primary interface for all commands:
 
 ```bash
+# 🌐 0. Start FastAPI REST API & Localhost Web Dashboard Server
+python main.py serve                            # Starts server on http://127.0.0.1:8000
+python server.py                                # Alternative direct entrypoint
+
 # ⭐️ 1. Full End-to-End Pipeline (Train All Base -> Report -> Ensemble)
 python main.py all-in-one                       # Interactive prompt for val vs oof mode
 python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
@@ -138,72 +152,21 @@ python main.py ensemble --mode oof               # Full 5-Fold OOF Mode (~10-13 
 python main.py report
 ```
 
-#### 4. Direct Modular Script Execution (`scripts/`)
+#### 4. Web Dashboard & REST API Endpoints
 
-Alternatively, run specific entry scripts directly from the `scripts/` folder:
-
-```bash
-python scripts/train.py configs/resnet50.yaml
-python scripts/evaluate.py configs/resnet50.yaml --split test
-python scripts/run_experiments.py
-python scripts/run_ensemble_eval.py --mode val
-python scripts/generate_comparison.py
-```
-
-*Or via Python API:*
-
-```python
-import numpy as np
-from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsemble
-
-# Load probability predictions saved during evaluation
-p_resnet = np.load("outputs/resnet50/test_probabilities.npy")
-p_densenet = np.load("outputs/densenet121/test_probabilities.npy")
-p_swin = np.load("outputs/swin_tiny/test_probabilities.npy")
-labels = np.load("outputs/resnet50/test_labels.npy")
-
-probs = [p_resnet, p_densenet, p_swin]
-
-# Hard Voting
-hv = HardVoting()
-print("Hard Voting:", hv.evaluate(probs, labels))
-
-# Soft Voting
-sv = SoftVoting()
-print("Soft Voting:", sv.evaluate(probs, labels))
-
-# Weighted Voting
-wv = WeightedVoting()
-wv.fit(probs, labels)
-print("Weighted Voting:", wv.evaluate(probs, labels))
-
-# Stacking Ensemble
-stacker = StackingEnsemble(meta_learner="logistic_regression")
-stacker.fit(probs, labels) # Fit on OOF probabilities for leak-free evaluation
-print("Stacking:", stacker.evaluate(probs, labels))
-```
-
-#### 5. Adding a New Model Architecture
-
-Register the model in `src/models/factory.py`:
-
-```python
-@register_model("convnext_tiny")
-def _convnext_tiny(pretrained: bool = True, num_classes: int = 6, **kwargs):
-    import timm
-    return timm.create_model("convnext_tiny", pretrained=pretrained, num_classes=num_classes)
-```
-
-Create `configs/convnext_tiny.yaml` and run `python main.py train configs/convnext_tiny.yaml` without changing any training pipeline logic!
+Once the server is running (`python main.py serve`):
+- **Interactive Web Dashboard UI**: `http://127.0.0.1:8000/` (Drag & drop images, press `Ctrl + V` to paste screenshots, or click Clear).
+- **Swagger OpenAPI Documentation**: `http://127.0.0.1:8000/docs`.
+- **Multi-Image Prediction API**: `POST /api/v1/predict` (Accepts `files` and `mode_type`).
 
 ---
 
 <a name="tiếng-việt"></a>
 ## Tiếng Việt
 
-Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ nghiên cứu Phân loại ảnh và Học kết hợp (Ensemble Learning - Hard Voting, Soft Voting, Weighted Voting, Stacking). Khung làm việc được thiết kế theo kiến trúc mô-đun, đảm bảo tính tái lập (reproducibility) cao và điều khiển hoàn toàn bằng cấu hình (config-driven) dành cho khóa luận tốt nghiệp và các bài báo nghiên cứu.
+Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ nghiên cứu Phân loại ảnh, Học kết hợp (Ensemble Learning - Hard Voting, Soft Voting, Weighted Voting, Stacking) và triển khai Web API phân loại ảnh thời gian thực. Khung làm việc được thiết kế theo kiến trúc mô-đun, đảm bảo tính tái lập (reproducibility) cao, điều khiển hoàn toàn bằng cấu hình (config-driven) và tách biệt kiến trúc Frontend/Backend chuẩn Clean Code dành cho khóa luận tốt nghiệp, bài báo nghiên cứu và ứng dụng Web.
 
-> 📖 **Tài liệu Chi tiết về Mã nguồn & Kiến trúc**: Xem tệp [docs/codebase_documentation.md](docs/codebase_documentation.md) để đọc phân tích chi tiết từng mô-đun, luồng thực thi dữ liệu và đặc tả kỹ thuật.
+> 📖 **Tài liệu Chi tiết về Mã nguồn & Kiến trúc**: Xem tệp [docs/codebase_documentation.md](docs/codebase_documentation.md) để đọc phân tích chi tiết từng mô-đun, luồng thực thi dữ liệu, REST API endpoints và đặc tả kỹ thuật.
 
 <p align="center">
   <img src="assets/tiem_nang_qua_lon.jpg" alt="Tổng quan Hệ thống" width="100%"/>
@@ -212,23 +175,34 @@ Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ 
 ### Tính năng chính
 
 - **Quản lý bằng Config**: Mọi tham số (mô hình, dữ liệu, huấn luyện, tăng cường dữ liệu, điểm kiểm tra checkpoint) được định nghĩa hoàn toàn qua tệp YAML.
-- **Model Factory**: Sử dụng mẫu thiết kế Registry giúp dễ dàng thêm kiến trúc mạng mới (ResNet, DenseNet, EfficientNet, Swin Transformer, ConvNeXt...) chỉ với một decorator duy nhất.
-- **Bộ huấn luyện dùng chung (Generic Trainer)**: Một Trainer duy nhất hỗ trợ Tự động ép kiểu hỗn hợp (AMP), Cắt tầng đạo hàm (Gradient clipping), Tích lũy đạo hàm (Gradient accumulation), Lịch trình học tập có khởi động (Warmup LR), Dừng sớm (Early stopping) và lưu trữ checkpoint.
+- **Model Factory**: Sử dụng mẫu thiết kế Registry giúp dễ dàng thêm kiến trúc mạng mới (ResNet, DenseNet, EfficientNet, Swin Transformer, ConvNeXt...) chỉ với một decorator duy nhất (`@register_model`).
+- **Bộ huấn luyện dùng chung (Generic Trainer)**: Trainer hỗ trợ Tự động ép kiểu hỗn hợp (AMP), Cắt tầng đạo hàm (Gradient clipping), Tích lũy đạo hàm (Gradient accumulation), Lịch trình học tập có khởi động (Warmup LR), Dừng sớm (Early stopping) và lưu trữ checkpoint.
+- **Quản lý Tập dữ liệu Tập trung (`configs/dataset.yaml`)**: Nguồn sự thật duy nhất (Single Source of Truth) khai báo số lớp, nhãn class, đường dẫn dữ liệu và tên tiếng Việt hiển thị, không hardcode tên class trong code Python.
+- **Tự động nhận diện (Auto-Discovery)**: `src/utils/config.py` tự động đọc `dataset.yaml` hoặc tự quét tên thư mục `data/` và tệp `outputs/**/class_to_idx.json` để tự cấu hình `num_classes` cho tất cả các mô hình.
+- **Bộ điều khiển Master CLI tương tác (`main.py`)**: Hỗ trợ phím mũi tên `↑` / `↓` + `Enter` hoặc gõ số `1`-`7` để chọn tác vụ dạng Angular CLI.
+- **Biểu đồ Phân tích Web Analytics**:
+  - Tích hợp 2 tab phân tích riêng biệt: `Base Models (4)` & `Ensemble Methods (6)`.
+  - Biểu đồ phân rã chỉ số từng loại bệnh lá trà (*F1-Score*, *Precision*, *Recall*) cho cả Mô hình đơn và Phương pháp Ensemble.
+  - Trạng thái Active phát sáng Glow UI/UX cho nút đóng/mở Analytics.
 - **Mô-đun Ensemble độc lập**: Xử lý trực tiếp trên các mảng xác suất NumPy (không phụ thuộc vào PyTorch) bao gồm:
   - Hard Voting (Bầu chọn theo đa số)
   - Soft Voting (Trung bình cộng xác suất)
   - Weighted Voting (Tối ưu hóa trọng số tự động bằng Grid-search)
-  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) để chống rò rỉ dữ liệu (data leakage).
-- **Bộ điều khiển Master CLI thống nhất (`main.py`)**: Giao diện dòng lệnh tập trung tại root điều khiển toàn bộ các thao tác train, evaluate, benchmark, ensemble và report.
-- **Tính tái lập (Reproducibility)**: Cố định seed toàn cục, cấu hình tính toán CUDA nhất quán và DataLoader theo seed.
-- **Tương thích đa nền tảng**: Chạy tốt trên máy cục bộ (Windows, Linux, macOS), Kaggle Notebooks và Google Colab.
+  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) để chống rò rỉ dữ liệu.
+- **FastAPI Web Server & REST API (`server.py`)**: Máy chủ inference hiệu năng cao hỗ trợ xử lý batch nhiều ảnh, trả về metadata `dataset_info` và cache trọng số mô hình tối ưu.
 
 ### Cấu trúc thư mục
 
 ```
 pipeline/
-├── main.py                   # Bộ điều khiển Master CLI duy nhất
+├── main.py                   # Bộ điều khiển Master CLI (Menu tương tác & các câu lệnh)
+├── server.py                 # Máy chủ FastAPI REST API & Inference Server
+├── web/                      # Thư mục Frontend tách biệt độc lập
+│   ├── index.html            # Cấu trúc HTML Dashboard & 2 tab Analytics
+│   ├── styles.css            # Tệp CSS Dark Mode Glassmorphism & hiệu ứng Glow Active
+│   └── app.js                # Tệp JavaScript xử lý Upload, Ctrl+V Paste, Charts & Fetch API
 ├── configs/                  # Các tệp cấu hình YAML
+│   ├── dataset.yaml          # Registry Tập dữ liệu tập trung (nhãn class, tên tiếng Việt)
 │   ├── resnet50.yaml
 │   ├── densenet121.yaml
 │   ├── efficientnet_b0.yaml
@@ -244,9 +218,11 @@ pipeline/
 │   ├── models/               # ModelFactory & Đăng ký mô hình
 │   ├── engine/               # Generic Trainer, Evaluator & CheckpointManager
 │   ├── ensemble/             # Mô-đun Ensemble (Voting, Stacking, OOF)
-│   └── utils/                # Đọc Config, Logger, Metrics, Đồ thị & Báo cáo
+│   └── utils/                # Đọc Config, Logger, Metrics, Báo cáo & Trực quan hóa
 ├── requirements.txt          # Danh sách thư viện phụ thuộc đã khóa phiên bản
-└── README.md
+├── README.md                 # Tài liệu song ngữ (English & Tiếng Việt)
+└── docs/
+    └── codebase_documentation.md # Tài liệu kỹ thuật chi tiết toàn bộ mã nguồn
 ```
 
 ### Các mô hình hỗ trợ ban đầu
@@ -273,14 +249,12 @@ source venv/bin/activate
 # Cài đặt PyTorch hỗ trợ GPU CUDA (Khuyên dùng cho card NVIDIA, VD: CUDA 12.4)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# Cài đặt các thư viện cần thiết còn lại
+# Cài đặt các thư viện cần thiết còn lại (bao gồm FastAPI & Uvicorn)
 pip install -r requirements.txt
 
 # Kiểm tra GPU đã nhận diện chưa
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
-
-> ⚠️ **LƯU Ý VỀ CUDA**: Hãy đảm bảo bạn cài đặt phiên bản PyTorch khớp với phiên bản CUDA Toolkit trên máy của bạn (VD: `cu124`, `cu121`). Nếu chạy trên CPU (`CUDA available: False`), tốc độ huấn luyện sẽ chậm hơn hàng chục lần.
 
 #### 2. Chuẩn bị dữ liệu
 
@@ -305,6 +279,10 @@ data/
 Sử dụng `python main.py` làm giao diện chính duy nhất cho mọi lệnh:
 
 ```bash
+# 🌐 0. Khởi chạy Server FastAPI REST API & Web Dashboard Localhost
+python main.py serve                            # Chạy server tại http://127.0.0.1:8000
+python server.py                                # Hoặc chạy trực tiếp file server.py
+
 # ⭐️ 1. Lệnh All-in-One chạy trọn gói Pipeline (Train Base -> Báo cáo Base -> Đánh giá Ensemble)
 python main.py all-in-one                       # Chọn mode val/oof qua giao diện menu tương tác
 python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
@@ -332,64 +310,7 @@ python main.py ensemble --mode oof               # Chế độ Full 5-Fold OOF (
 python main.py report
 ```
 
-#### 4. Chạy trực tiếp từ thư mục `scripts/`
-
-Bạn cũng có thể chạy trực tiếp các script mô-đun riêng lẻ trong thư mục `scripts/`:
-
-```bash
-python scripts/train.py configs/resnet50.yaml
-python scripts/evaluate.py configs/resnet50.yaml --split test
-python scripts/run_experiments.py
-python scripts/run_ensemble_eval.py --mode val
-python scripts/generate_comparison.py
-```
-
-*Hoặc qua Python API:*
-
-```python
-import numpy as np
-from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsemble
-
-# Tải xác suất dự đoán đã lưu sau quá trình đánh giá (sử dụng tên tệp chuẩn hóa)
-p_resnet = np.load("outputs/resnet50/test_probabilities.npy")
-p_densenet = np.load("outputs/densenet121/test_probabilities.npy")
-p_swin = np.load("outputs/swin_tiny/test_probabilities.npy")
-labels = np.load("outputs/resnet50/test_labels.npy")
-
-probs = [p_resnet, p_densenet, p_swin]
-
-# Hard Voting
-hv = HardVoting()
-print("Hard Voting:", hv.evaluate(probs, labels))
-
-# Soft Voting
-sv = SoftVoting()
-print("Soft Voting:", sv.evaluate(probs, labels))
-
-# Weighted Voting
-wv = WeightedVoting()
-wv.fit(probs, labels)
-print("Weighted Voting:", wv.evaluate(probs, labels))
-
-# Stacking Ensemble
-stacker = StackingEnsemble(meta_learner="logistic_regression")
-stacker.fit(probs, labels) # Fit trên xác suất OOF để chống rò rỉ dữ liệu
-print("Stacking:", stacker.evaluate(probs, labels))
-```
-
-#### 5. Thêm kiến trúc mô hình mới
-
-Đăng ký mô hình mới trong `src/models/factory.py`:
-
-```python
-@register_model("convnext_tiny")
-def _convnext_tiny(pretrained: bool = True, num_classes: int = 6, **kwargs):
-    import timm
-    return timm.create_model("convnext_tiny", pretrained=pretrained, num_classes=num_classes)
-```
-
-Tạo tệp cấu hình `configs/convnext_tiny.yaml` và thực thi `python main.py train configs/convnext_tiny.yaml` mà không cần thay đổi bất kỳ dòng mã nguồn huấn luyện nào!
-
 ---
+
 ## License
 Academic Research & Thesis Use.

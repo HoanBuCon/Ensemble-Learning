@@ -220,6 +220,14 @@ def load_config(path: str) -> ExperimentConfig:
     checkpoint = _build_dataclass(CheckpointConfig, raw.get("checkpoint", {}))
     logging_cfg = _build_dataclass(LoggingConfig, raw.get("logging", {}))
 
+    # Dynamically inherit num_classes from configs/dataset.yaml
+    try:
+        ds_cfg = load_dataset_config()
+        if ds_cfg and "num_classes" in ds_cfg:
+            model.num_classes = ds_cfg["num_classes"]
+    except Exception:
+        pass
+
     # Augmentation requires special handling
     aug_raw = raw.get("augmentation", {})
     aug = AugmentConfig(
@@ -238,4 +246,86 @@ def load_config(path: str) -> ExperimentConfig:
         train=train_cfg,
         checkpoint=checkpoint,
         logging=logging_cfg,
+    )
+
+
+def load_dataset_config(dataset_cfg_path: str = "configs/dataset.yaml") -> Dict[str, Any]:
+    """
+    Load dataset specification from YAML config file or auto-discover from data directories / outputs.
+
+    Args:
+        dataset_cfg_path: Path to dataset YAML configuration file.
+
+    Returns:
+        Dictionary containing dataset metadata, class names, display names, and paths.
+
+    Raises:
+        ValueError: If dataset classes cannot be resolved from YAML or filesystem.
+    """
+    cfg_path = Path(dataset_cfg_path)
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            ds_info = raw.get("dataset", {})
+            classes = ds_info.get("classes", [])
+            if classes:
+                display_names = ds_info.get("display_names", {})
+                for c in classes:
+                    if c not in display_names:
+                        display_names[c] = str(c).replace("_", " ")
+                return {
+                    "name": ds_info.get("name", "custom_dataset"),
+                    "display_title": ds_info.get("display_title", "Custom Image Classification Benchmark Dataset"),
+                    "task_type": ds_info.get("task_type", "multi_class_classification"),
+                    "num_classes": len(classes),
+                    "data_root": ds_info.get("data_root", "./data"),
+                    "classes": classes,
+                    "display_names": display_names,
+                }
+        except Exception as e:
+            print(f"Warning: Failed to parse {dataset_cfg_path}: {e}")
+
+    # Auto-discovery Strategy 1: Check class_to_idx.json in outputs/
+    import glob
+    import json
+    outputs_dir = Path("outputs")
+    for json_file in outputs_dir.glob("**/class_to_idx.json"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                c2i = json.load(f)
+                discovered_classes = sorted(c2i.keys(), key=lambda k: c2i[k])
+                if discovered_classes:
+                    return {
+                        "name": "auto_discovered_dataset",
+                        "display_title": "Auto-Discovered Dataset (from Checkpoints)",
+                        "task_type": "multi_class_classification",
+                        "num_classes": len(discovered_classes),
+                        "data_root": "./data",
+                        "classes": discovered_classes,
+                        "display_names": {c: c.replace("_", " ") for c in discovered_classes},
+                    }
+        except Exception:
+            pass
+
+    # Auto-discovery Strategy 2: Check folder names in data/train, data/val, data/test, or data/
+    for sub in ["train", "val", "test", ""]:
+        data_dir = Path("./data") / sub if sub else Path("./data")
+        if data_dir.exists() and data_dir.is_dir():
+            dirs = [d.name for d in data_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+            if dirs:
+                discovered_classes = sorted(dirs)
+                return {
+                    "name": "auto_discovered_dataset",
+                    "display_title": "Auto-Discovered Dataset (from Data Directory)",
+                    "task_type": "multi_class_classification",
+                    "num_classes": len(discovered_classes),
+                    "data_root": "./data",
+                    "classes": discovered_classes,
+                    "display_names": {c: c.replace("_", " ") for c in discovered_classes},
+                }
+
+    raise ValueError(
+        f"Could not resolve dataset classes. Neither valid 'classes' list found in {dataset_cfg_path} "
+        "nor subdirectories present under ./data/"
     )

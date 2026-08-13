@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -42,7 +43,7 @@ from src.ensemble import (
 from src.ensemble.base import EnsembleBase
 from src.ensemble.oof import OOFGenerator
 from src.models.factory import create_model
-from src.utils.config import load_config
+from src.utils.config import load_config, load_dataset_config
 from src.utils.metrics import compute_metrics
 
 
@@ -201,10 +202,16 @@ def run_ensemble_evaluation(
 
     meta_test_probs = base_test_probs_list
 
+    ds_cfg = load_dataset_config()
+    class_names = ds_cfg.get("classes", [])
+
     # Single Model Baseline Results on Test Set
     single_model_results = []
+    full_metrics_store = {}
+
     for m_name, probs in zip(base_models, meta_test_probs):
-        m_metrics = compute_metrics(test_labels, np.argmax(probs, axis=1))
+        m_metrics = compute_metrics(test_labels, np.argmax(probs, axis=1), class_names=class_names)
+        full_metrics_store[f"Single Model ({m_name})"] = m_metrics
         single_model_results.append({
             "Method": f"Single Model ({m_name})",
             "Type": "Individual",
@@ -219,10 +226,12 @@ def run_ensemble_evaluation(
 
     # Ensemble Methods Evaluation
     ensemble_evaluations = []
+    per_class_rows = []
 
     # 1. Hard Voting
     hv = HardVoting()
-    hv_metrics = hv.evaluate(meta_test_probs, test_labels)
+    hv_metrics = hv.evaluate(meta_test_probs, test_labels, class_names=class_names)
+    full_metrics_store["Hard Voting Ensemble"] = hv_metrics
     ensemble_evaluations.append({
         "Method": "Hard Voting Ensemble",
         "Type": "Ensemble (Voting)",
@@ -235,7 +244,8 @@ def run_ensemble_evaluation(
 
     # 2. Soft Voting
     sv = SoftVoting()
-    sv_metrics = sv.evaluate(meta_test_probs, test_labels)
+    sv_metrics = sv.evaluate(meta_test_probs, test_labels, class_names=class_names)
+    full_metrics_store["Soft Voting Ensemble"] = sv_metrics
     ensemble_evaluations.append({
         "Method": "Soft Voting Ensemble",
         "Type": "Ensemble (Voting)",
@@ -249,7 +259,8 @@ def run_ensemble_evaluation(
     # 3. Weighted Voting
     wv = WeightedVoting()
     wv.fit(meta_train_probs, meta_train_labels)
-    wv_metrics = wv.evaluate(meta_test_probs, test_labels)
+    wv_metrics = wv.evaluate(meta_test_probs, test_labels, class_names=class_names)
+    full_metrics_store["Weighted Voting Ensemble"] = wv_metrics
     w_str = ", ".join(f"{name}: {w:.2f}" for name, w in zip(base_models, wv.weights))
     ensemble_evaluations.append({
         "Method": "Weighted Voting Ensemble",
@@ -266,11 +277,13 @@ def run_ensemble_evaluation(
     fit_label = "Validation Set" if mode == "val" else "5-Fold OOF Train Set"
 
     for meta in meta_learners:
+        m_label = f"Stacking ({meta.replace('_', ' ').title()})"
         stk = StackingEnsemble(meta_learner=meta)
         stk.fit(meta_train_probs, meta_train_labels)
-        stk_metrics = stk.evaluate(meta_test_probs, test_labels)
+        stk_metrics = stk.evaluate(meta_test_probs, test_labels, class_names=class_names)
+        full_metrics_store[m_label] = stk_metrics
         ensemble_evaluations.append({
-            "Method": f"Stacking ({meta.replace('_', ' ').title()})",
+            "Method": m_label,
             "Type": "Ensemble (Stacking)",
             "Accuracy": stk_metrics["accuracy"] * 100,
             "Precision": stk_metrics["precision"] * 100,
@@ -279,7 +292,21 @@ def run_ensemble_evaluation(
             "Details": f"Meta-learner: {meta} (Fit on {fit_label})",
         })
 
-    # Combine all results
+    # Build Per-Class Breakdown DataFrame
+    for method_name, m_dict in full_metrics_store.items():
+        per_cls = m_dict.get("per_class", {})
+        for c_name, c_data in per_cls.items():
+            per_class_rows.append({
+                "Method": method_name,
+                "Disease_Class": c_name,
+                "Precision": f"{c_data['precision'] * 100:.2f}%",
+                "Recall": f"{c_data['recall'] * 100:.2f}%",
+                "F1_Score": f"{c_data['f1_score'] * 100:.2f}%",
+                "Support": c_data['support'],
+            })
+    df_per_class = pd.DataFrame(per_class_rows)
+
+    # Combine overall results
     all_results = single_model_results + ensemble_evaluations
     df_results = pd.DataFrame(all_results)
 
@@ -301,6 +328,9 @@ def run_ensemble_evaluation(
 
     csv_path = os.path.join(mode_output_dir, "ensemble_comparison.csv")
     md_path = os.path.join(mode_output_dir, "ensemble_comparison.md")
+    per_class_csv_path = os.path.join(mode_output_dir, "ensemble_per_class_report.csv")
+    per_class_md_path = os.path.join(mode_output_dir, "ensemble_per_class_report.md")
+    full_json_path = os.path.join(mode_output_dir, "ensemble_full_metrics.json")
 
     # Format percentage strings for saved tables
     formatted_df = df_results.copy()
@@ -308,17 +338,30 @@ def run_ensemble_evaluation(
         formatted_df[col] = formatted_df[col].apply(lambda x: f"{x:.2f}%")
 
     formatted_df.to_csv(csv_path, index=False)
+    df_per_class.to_csv(per_class_csv_path, index=False)
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# Ensemble Methods Structured Benchmark Comparison (Mode: {mode.upper()})\n\n")
         f.write(formatted_df.to_markdown(index=False))
 
+    with open(per_class_md_path, "w", encoding="utf-8") as f:
+        f.write(f"# Ensemble Methods Per-Class Disease Detailed Report (Mode: {mode.upper()})\n\n")
+        f.write(df_per_class.to_markdown(index=False))
+
+    with open(full_json_path, "w", encoding="utf-8") as f:
+        json.dump(full_metrics_store, f, indent=2)
+
     print(f"\n\n{'='*60}")
     print(f"  ENSEMBLE FINAL METRICS SUMMARY (MODE: {mode.upper()})")
     print(f"{'='*60}\n")
     print(formatted_df.to_string(index=False))
-    print(f"\n  Results saved to: {csv_path}")
-    print(f"  Markdown table: {md_path}\n")
+    print(f"\n  Results saved to:")
+    print(f"   - Main Summary CSV: {csv_path}")
+    print(f"   - Per-Class Report CSV: {per_class_csv_path}")
+    print(f"   - Per-Class Report Markdown: {per_class_md_path}")
+    print(f"   - Full JSON Dump: {full_json_path}\n")
+
+    return df_results
 
     return df_results
 

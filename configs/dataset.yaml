@@ -1,0 +1,36 @@
+# ============================================================
+# Global Dataset & Class Registry Configuration
+# ============================================================
+# This file serves as the Single Source of Truth for dataset
+# metadata, class names, and display labels across training,
+# evaluation, ensemble benchmarks, REST API, and Web UI.
+
+dataset:
+  name: "tea_leaf_diseases"
+  display_title: "Tea Leaf Disease Benchmark Dataset"
+  task_type: "multi_class_classification"
+  num_classes: 6
+
+  # Directory Paths
+  data_root: "./data"
+  train_dir: "./data/train"
+  val_dir: "./data/val"
+  test_dir: "./data/test"
+
+  # Class Identifiers (Must match folder names in data/train, data/val, data/test)
+  classes:
+    - "Brown_Blight"
+    - "Gray_Blight"
+    - "Green_mirid_bug"
+    - "Healthy_leaf"
+    - "Helopeltis"
+    - "Tea_algal_leaf_spot"
+
+  # Human-Readable Display Names for Reports, Charts & UI
+  display_names:
+    Brown_Blight: "Brown Blight (Cháy lá nâu)"
+    Gray_Blight: "Gray Blight (Cháy lá xám)"
+    Green_mirid_bug: "Green Mirid Bug (Rầy xanh)"
+    Healthy_leaf: "Healthy Leaf (Lá khỏe mạnh)"
+    Helopeltis: "Helopeltis (Bọ xít muỗi)"
+    Tea_algal_leaf_spot: "Algal Leaf Spot (Đốm tảo)"
