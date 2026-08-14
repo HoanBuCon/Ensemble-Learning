@@ -54,6 +54,7 @@ from src.utils.logger import (
     log_epoch,
     log_training_end,
     log_training_start,
+    log_training_startup_banner,
     setup_logger,
 )
 from src.utils.reproducibility import set_seed
@@ -359,13 +360,11 @@ class Trainer:
                 "history": self.history,
             }
 
-        log_training_start(
-            experiment_name=cfg.experiment_name,
-            model_name=cfg.model.name,
+        log_training_startup_banner(
+            config=self.config,
             num_params=self.num_params,
-            device=str(self.device),
-            epochs=total_epochs,
-            batch_size=cfg.data.batch_size,
+            is_kfold=False,
+            logger=self.logger,
         )
 
         global_start = time.time()

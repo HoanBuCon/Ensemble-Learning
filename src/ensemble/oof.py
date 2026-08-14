@@ -42,7 +42,7 @@ from src.datasets.dataset import ImageFolderDataset
 from src.datasets.transforms import build_transforms
 from src.models.factory import create_model
 from src.utils.config import ExperimentConfig, load_config, load_dataset_config
-from src.utils.logger import CSVLogger, setup_logger
+from src.utils.logger import CSVLogger, log_training_startup_banner, setup_logger
 from src.utils.metrics import compute_metrics
 from src.utils.reproducibility import get_generator, seed_worker, set_seed
 from src.utils.visualization import (
@@ -213,6 +213,19 @@ class OOFGenerator:
         test_probabilities_list: List[np.ndarray] = []
         fold_metrics_list: List[Dict[str, float]] = []
 
+        # Model param count for startup banner
+        temp_model = create_model(cfg.model.name, pretrained=False, num_classes=num_classes)
+        num_params = sum(p.numel() for p in temp_model.parameters() if p.requires_grad)
+        del temp_model
+
+        log_training_startup_banner(
+            config=self.config,
+            num_params=num_params,
+            is_kfold=True,
+            n_splits=self.n_splits,
+            logger=self.logger,
+        )
+
         skf = StratifiedKFold(
             n_splits=self.n_splits, shuffle=True, random_state=self.split_seed
         )
@@ -340,11 +353,18 @@ class OOFGenerator:
         if test_probabilities is not None:
             np.save(os.path.join(self.output_dir, "test_probabilities.npy"), test_probabilities)
 
+        # Save class mappings and experiment config
+        class_to_idx = getattr(full_train_dataset, "class_to_idx", {c: i for i, c in enumerate(class_names)})
+        with open(os.path.join(self.output_dir, "class_to_idx.json"), "w", encoding="utf-8") as f:
+            json.dump(class_to_idx, f, indent=2)
+
         # Compute overall OOF Metrics
         oof_preds = np.argmax(oof_probabilities, axis=1)
         oof_metrics = compute_metrics(all_labels, oof_preds, class_names=class_names)
         with open(os.path.join(self.output_dir, "oof_metrics.json"), "w", encoding="utf-8") as f:
             json.dump({k: v for k, v in oof_metrics.items() if k != "classification_report"}, f, indent=2)
+        with open(os.path.join(self.output_dir, "classification_report.txt"), "w", encoding="utf-8") as f:
+            f.write(oof_metrics.get("classification_report", ""))
 
         # Build K-Fold Cross Validation Summary Table
         df_kfold = pd.DataFrame(fold_metrics_list)
@@ -538,7 +558,17 @@ class OOFGenerator:
             os.path.join(fold_dir, "best_model.pth"),
         )
 
-        # Save history & plots
+        # Save history CSV, JSON & plots
+        history_df = pd.DataFrame({
+            "epoch": list(range(1, len(history["train_loss"]) + 1)),
+            "train_loss": history["train_loss"],
+            "train_accuracy": history["train_accuracy"],
+            "val_loss": history["val_loss"],
+            "val_accuracy": history["val_accuracy"],
+            "lr": history["lr"],
+        })
+        history_df.to_csv(os.path.join(fold_dir, "history.csv"), index=False)
+
         with open(os.path.join(fold_dir, "training_history.json"), "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
         plot_training_curves(history, fold_dir, model_name=f"{self.config.model.name} Fold {fold_num}")

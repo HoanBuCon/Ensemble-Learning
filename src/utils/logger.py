@@ -142,8 +142,150 @@ def log_epoch(
 
 
 # ============================================================
-# Training Banner
+# Training Startup Configuration Banner
 # ============================================================
+
+def get_hardware_info(device_str: str = "auto") -> Dict[str, str]:
+    """Query and return detailed hardware/device metadata."""
+    import platform
+    import torch
+
+    info: Dict[str, str] = {}
+    if torch.cuda.is_available() and device_str.lower() != "cpu":
+        dev_idx = torch.cuda.current_device()
+        prop = torch.cuda.get_device_properties(dev_idx)
+        vram_gb = prop.total_memory / (1024 ** 3)
+        info["Compute Device"] = "CUDA (GPU Acceleration)"
+        info["GPU Device Name"] = f"{prop.name} (Device ID: {dev_idx})"
+        info["Total Dedicated VRAM"] = f"{vram_gb:.2f} GB"
+        info["CUDA & cuDNN Version"] = (
+            f"CUDA {torch.version.cuda} | cuDNN {torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else 'N/A'}"
+        )
+    else:
+        info["Compute Device"] = "CPU (Host Processor)"
+        info["CPU Threads"] = f"{os.cpu_count()} logical cores"
+        info["Platform OS"] = f"{platform.system()} {platform.release()} ({platform.machine()})"
+
+    info["Python Runtime"] = f"Python {platform.python_version()} ({platform.python_implementation()})"
+    return info
+
+
+def log_training_startup_banner(
+    config: Any,
+    num_params: int = 0,
+    is_kfold: bool = False,
+    n_splits: int = 5,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """
+    Print a comprehensive Rich table and log full hardware/hyperparameter specs at startup.
+    """
+    import torch
+
+    device_str = getattr(config, "device", "auto")
+    hw = get_hardware_info(device_str)
+
+    cfg_train = getattr(config, "train", None)
+    cfg_data = getattr(config, "data", None)
+    cfg_model = getattr(config, "model", None)
+    cfg_ckpt = getattr(config, "checkpoint", None)
+    cfg_aug = getattr(config, "augmentation", None)
+
+    table = Table(
+        title="[bold white on blue]  TRAINING STARTUP CONFIGURATION & HARDWARE SPECIFICATIONS  [/bold white on blue]",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="bright_blue",
+        expand=False,
+        pad_edge=True,
+    )
+
+    table.add_column("Category", style="bold yellow", min_width=18)
+    table.add_column("Parameter / Attribute", style="bold white", min_width=26)
+    table.add_column("Configured Value / Specification", style="bold green", min_width=38)
+
+    # 1. Hardware & Environment
+    for idx, (k, v) in enumerate(hw.items()):
+        cat_label = "HARDWARE & ENV" if idx == 0 else ""
+        table.add_row(cat_label, k, v)
+
+    table.add_section()
+
+    # 2. Model Specifications
+    m_name = getattr(cfg_model, "name", "unknown") if cfg_model else "unknown"
+    pretrained = getattr(cfg_model, "pretrained", True) if cfg_model else True
+    num_classes = getattr(cfg_model, "num_classes", 6) if cfg_model else 6
+    exp_name = getattr(config, "experiment_name", "experiment")
+
+    table.add_row("MODEL SPECS", "Experiment Identifier", str(exp_name))
+    table.add_row("", "Architecture Backbone", f"{m_name.upper()} (Pretrained={pretrained}, Classes={num_classes})")
+    if num_params > 0:
+        table.add_row("", "Trainable Parameters", f"{num_params:,} ({num_params / 1e6:.2f}M)")
+
+    protocol_str = f"5-Fold Stratified Cross Validation ({n_splits} Folds)" if is_kfold else "Default Single Split (Train/Val/Test)"
+    table.add_row("", "Training Protocol", protocol_str)
+
+    table.add_section()
+
+    # 3. Training & Hyperparameters
+    if cfg_train:
+        epochs = getattr(cfg_train, "epochs", 30)
+        optimizer = getattr(cfg_train, "optimizer", "adamw").upper()
+        lr = getattr(cfg_train, "lr", 1e-4)
+        wd = getattr(cfg_train, "weight_decay", 1e-4)
+        sched = getattr(cfg_train, "scheduler", "cosine").capitalize()
+        warmup = getattr(cfg_train, "warmup_epochs", 3)
+        patience = getattr(cfg_train, "early_stopping_patience", 6)
+        smoothing = getattr(cfg_train, "label_smoothing", 0.1)
+        amp = getattr(cfg_train, "mixed_precision", True)
+        grad_clip = getattr(cfg_train, "gradient_clip_value", 1.0)
+
+        table.add_row("HYPERPARAMETERS", "Total Epoch Budget", f"{epochs} Epochs")
+        table.add_row("", "Optimizer & Learning Rate", f"{optimizer} (LR: {lr:.2e}, Weight Decay: {wd:.2e})")
+        table.add_row("", "Scheduler & Warmup", f"{sched} Annealing (Warmup: {warmup} epochs)")
+        table.add_row("", "Early Stopping Strategy", f"Patience: {patience} epochs")
+        table.add_row("", "Regularization", f"Label Smoothing: {smoothing} | Grad Clip: {grad_clip}")
+        table.add_row("", "Mixed Precision (AMP)", "ENABLED (torch.amp.autocast)" if amp else "DISABLED (FP32)")
+
+    # 4. Data & Augmentation
+    if cfg_data:
+        bs = getattr(cfg_data, "batch_size", 32)
+        img_sz = getattr(cfg_data, "image_size", 224)
+        nw = getattr(cfg_data, "num_workers", 4)
+        table.add_row("DATA & INPUT", "Batch Size & Resolution", f"Batch={bs}, Resolution={img_sz}x{img_sz}, Workers={nw}")
+
+    if cfg_aug:
+        train_aug = getattr(cfg_aug, "train", {})
+        hflip = getattr(train_aug, "horizontal_flip", 0.5)
+        vflip = getattr(train_aug, "vertical_flip", 0.5)
+        rot = getattr(train_aug, "rotation_limit", 15)
+        table.add_row("", "Data Augmentation", f"H-Flip: {hflip} | V-Flip: {vflip} | Rot: +/-{rot} deg")
+
+    # 5. Checkpoint & Loss-Gate
+    if cfg_ckpt:
+        mon = getattr(cfg_ckpt, "monitor", "val_accuracy")
+        mode = getattr(cfg_ckpt, "mode", "max")
+        tol = getattr(cfg_ckpt, "loss_gate_tolerance", 0.05)
+        s_dir = getattr(cfg_ckpt, "save_dir", "./outputs")
+        table.add_row("CHECKPOINTING", "Target Directory", str(s_dir))
+        table.add_row("", "Monitor Metric", f"{mon} ({mode})")
+        table.add_row("", "Loss-Gate Safeguard", f"ACTIVE (Max Allowed Loss Drift: {tol*100:.1f}%)")
+
+    console.print()
+    console.print(table)
+    console.print()
+
+    # Log text summary to logger file
+    if logger:
+        logger.info("=" * 70)
+        logger.info(f"  TRAINING STARTUP: {exp_name.upper()} ({protocol_str})")
+        logger.info("=" * 70)
+        for k, v in hw.items():
+            logger.info(f"  [HARDWARE] {k}: {v}")
+        if cfg_train:
+            logger.info(f"  [CONFIG] Epochs: {getattr(cfg_train, 'epochs', 30)} | Optimizer: {getattr(cfg_train, 'optimizer', 'adamw')} | LR: {getattr(cfg_train, 'lr', 1e-4)}")
+            logger.info(f"  [CONFIG] Loss-Gate Tolerance: {getattr(cfg_ckpt, 'loss_gate_tolerance', 0.05)*100:.1f}% | Early Stop Patience: {getattr(cfg_train, 'early_stopping_patience', 6)}")
+
 
 def log_training_start(
     experiment_name: str,
