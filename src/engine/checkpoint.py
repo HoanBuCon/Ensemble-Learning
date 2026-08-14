@@ -42,10 +42,13 @@ class CheckpointManager:
         save_dir: str,
         monitor: str = "val_accuracy",
         mode: str = "max",
+        loss_gate_tolerance: float = 0.05,
     ) -> None:
         self.save_dir = save_dir
         self.monitor = monitor
         self.mode = mode
+        self.loss_gate_tolerance = loss_gate_tolerance
+        self.min_val_loss: float = float("inf")
 
         os.makedirs(save_dir, exist_ok=True)
 
@@ -96,12 +99,28 @@ class CheckpointManager:
         history: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Save checkpoint if ``current_metric`` improves on the best so far.
+        Save checkpoint if ``current_metric`` improves on the best so far,
+        guarded by the Dual-Metric Loss Gate to prevent saving overfitted checkpoints.
 
         Returns:
-            ``True`` if a new best was saved.
+            ``True`` if a new best was saved, ``False`` if rejected or not improved.
         """
+        # Track minimum validation loss across all epochs
+        if metrics is not None and "val_loss" in metrics:
+            val_loss = float(metrics["val_loss"])
+            if val_loss < self.min_val_loss:
+                self.min_val_loss = val_loss
+
         if self._is_best_fn(current_metric, self.best_value):
+            # Dual-Metric Safeguard: If monitoring Accuracy, ensure Val Loss hasn't diverged
+            if self.mode == "max" and metrics is not None and "val_loss" in metrics:
+                val_loss = float(metrics["val_loss"])
+                if self.loss_gate_tolerance > 0 and self.min_val_loss < float("inf"):
+                    max_allowed_loss = (1.0 + self.loss_gate_tolerance) * self.min_val_loss
+                    if val_loss > max_allowed_loss:
+                        # Rejected by Loss-Gate Safeguard
+                        return False
+
             self.best_value = current_metric
             state = self._build_state(
                 model, optimizer, scheduler, epoch, metrics, history

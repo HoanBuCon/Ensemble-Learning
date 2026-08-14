@@ -160,11 +160,13 @@ class Trainer:
         self.use_amp = config.train.mixed_precision and self.device.type == "cuda"
         self.scaler = GradScaler("cuda", enabled=self.use_amp)
 
-        # Checkpoint manager
+        # Checkpoint manager with Dual-Metric Safeguard
+        loss_gate_tol = getattr(config.checkpoint, "loss_gate_tolerance", 0.05)
         self.ckpt_manager = CheckpointManager(
             save_dir=config.checkpoint.save_dir,
             monitor=config.checkpoint.monitor,
             mode=config.checkpoint.mode,
+            loss_gate_tolerance=loss_gate_tol,
         )
 
         # CSV logger
@@ -490,13 +492,8 @@ class Trainer:
                     history=self.history,
                 )
 
-            # --- Early stopping ---
-            if cfg.checkpoint.mode == "max":
-                improved = current_metric > self._best_metric
-            else:
-                improved = current_metric < self._best_metric
-
-            if improved:
+            # --- Early stopping (Guarded by Loss-Gate) ---
+            if is_best:
                 self._best_metric = current_metric
                 self._early_stop_counter = 0
             else:

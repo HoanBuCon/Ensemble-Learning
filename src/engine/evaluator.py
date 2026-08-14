@@ -31,7 +31,12 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from src.utils.metrics import compute_metrics
-from src.utils.visualization import plot_confusion_matrix
+from src.utils.visualization import (
+    plot_confusion_matrix,
+    plot_per_class_metrics,
+    plot_precision_recall_curves,
+    plot_roc_curves,
+)
 
 
 def run_inference(
@@ -189,8 +194,33 @@ def evaluate_model(
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(metrics["classification_report"])
 
-    # Plot confusion matrix
+    # Generate comprehensive visualizations
     cm = np.array(metrics["confusion_matrix"])
-    plot_confusion_matrix(cm, class_names, output_dir)
+    plot_confusion_matrix(
+        cm, class_names, output_dir,
+        title=f"Confusion Matrix ({split.title()} Split)",
+        normalize=False, filename="confusion_matrix.png",
+    )
+    plot_confusion_matrix(
+        cm, class_names, output_dir,
+        title=f"Normalized Confusion Matrix ({split.title()} Split)",
+        normalize=True, filename="confusion_matrix_normalized.png",
+    )
+
+    per_class = metrics.get("per_class", {})
+    if per_class:
+        plot_per_class_metrics(
+            per_class, class_names, output_dir,
+            filename="per_class_metrics.png",
+        )
+
+    plot_roc_curves(
+        labels, probabilities, class_names, output_dir,
+        filename="roc_curves.png",
+    )
+    plot_precision_recall_curves(
+        labels, probabilities, class_names, output_dir,
+        filename="precision_recall_curves.png",
+    )
 
     return metrics

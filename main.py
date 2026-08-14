@@ -34,6 +34,8 @@ from scripts.evaluate import evaluate as run_evaluate
 from scripts.run_experiments import run_experiments
 from scripts.run_ensemble_eval import run_ensemble_evaluation
 from scripts.generate_comparison import generate_base_comparison_report
+from scripts.generate_all_plots import generate_all_plots
+from scripts.run_kfold import run_kfold_experiment, run_all_kfold_experiments
 
 
 def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
@@ -236,7 +238,28 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         help="Optional list of YAML config files to inspect",
     )
 
-    # 7. Serve Subcommand (FastAPI Web Server)
+    # 7. Plot Subcommand (Master Plot Generator)
+    plot_parser = subparsers.add_parser("plot", aliases=["plots", "visualize"], help="Generate complete visualization suite (Training, ROC, PR, CM, Heatmaps, Radar)")
+    plot_parser.add_argument(
+        "--outputs-dir",
+        default="outputs",
+        help="Output directory (default: 'outputs')",
+    )
+
+    # 8. K-Fold Subcommand (5-Fold Cross Validation for Single Model)
+    kfold_parser = subparsers.add_parser("kfold", help="Run 5-Fold Cross Validation for a single backbone")
+    kfold_parser.add_argument("config", help="Path to YAML config file (e.g. configs/resnet50.yaml)")
+    kfold_parser.add_argument("--folds", type=int, default=5, help="Number of folds (default: 5)")
+    kfold_parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (default: 42)")
+    kfold_parser.add_argument("--force-retrain", action="store_true", help="Force retrain all folds")
+
+    # 9. K-Fold All Subcommand (5-Fold Cross Validation for All Models)
+    kfold_all_parser = subparsers.add_parser("kfold-all", help="Run 5-Fold Cross Validation for ALL backbone models")
+    kfold_all_parser.add_argument("--folds", type=int, default=5, help="Number of folds (default: 5)")
+    kfold_all_parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (default: 42)")
+    kfold_all_parser.add_argument("--force-retrain", action="store_true", help="Force retrain all folds")
+
+    # 10. Serve Subcommand (FastAPI Web Server)
     serve_parser = subparsers.add_parser(
         "serve",
         aliases=["api", "server"],
@@ -359,9 +382,11 @@ def run_interactive_cli_menu() -> None:
         "🚀 Run Full End-to-End Pipeline (Train Base -> Report -> Ensemble)",
         "🏋️ Train a Single Backbone Model (ResNet-50 / DenseNet-121 / EfficientNet-B0 / Swin-Tiny)",
         "⚡ Run Ensemble Benchmark Evaluation (Voting & Stacking Meta-Learners)",
+        "🔁 Run 5-Fold Cross Validation (Single Backbone or All Backbones)",
+        "📈 Generate Complete Diagnostic Visualization Suite (Plots & Heatmaps)",
         "🌐 Start FastAPI Web Server & Visualizer Dashboard (http://127.0.0.1:8000)",
         "🔬 Evaluate Trained Model Checkpoint on Test/Val Split",
-        "📊 Re-generate Comparison Tables & Benchmark Plots",
+        "📊 Re-generate Comparison Tables & Benchmark Reports",
         "❌ Exit CLI",
     ]
 
@@ -399,11 +424,27 @@ def run_interactive_cli_menu() -> None:
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 3:
+                configs = sorted(glob.glob("configs/*.yaml"))
+                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                kfold_options = ["Run 5-Fold CV on ALL Backbones"] + [f"Run 5-Fold CV on {os.path.basename(c).replace('.yaml','').upper()}" for c in configs]
+                k_idx = select_menu_option(kfold_options, "5-FOLD CROSS VALIDATION MENU")
+                if k_idx == 0:
+                    run_all_kfold_experiments(config_paths=configs, n_splits=5)
+                else:
+                    target_cfg = configs[k_idx - 1]
+                    run_kfold_experiment(target_cfg, n_splits=5)
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 4:
+                generate_all_plots(outputs_dir="outputs")
+                input("\nPress ENTER to return to main menu...")
+
+            elif choice_idx == 5:
                 import uvicorn
                 print("\nStarting FastAPI Web Server on http://127.0.0.1:8000 ...\n")
                 uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=False)
 
-            elif choice_idx == 4:
+            elif choice_idx == 6:
                 configs = sorted(glob.glob("configs/*.yaml"))
                 configs = [c for c in configs if not c.endswith("dataset.yaml")]
                 cfg_options = [f"{os.path.basename(c).replace('.yaml','').upper()} ({c})" for c in configs]
@@ -414,11 +455,11 @@ def run_interactive_cli_menu() -> None:
                 run_evaluate(target_cfg, checkpoint_path=None, split=split_name)
                 input("\nPress ENTER to return to main menu...")
 
-            elif choice_idx == 5:
+            elif choice_idx == 7:
                 generate_base_comparison_report(outputs_dir="outputs", config_paths=None)
                 input("\nPress ENTER to return to main menu...")
 
-            elif choice_idx == 6:
+            elif choice_idx == 8:
                 print("\nExiting Interactive Master CLI. Goodbye!\n")
                 break
 
@@ -456,7 +497,26 @@ def main() -> None:
         run_ensemble_evaluation(mode=mode, outputs_dir=args.outputs_dir)
 
     elif args.command == "report":
-        generate_base_comparison_report(outputs_dir=args.outputs_dir, config_paths=args.configs)
+        generate_all_plots(outputs_dir=args.outputs_dir)
+
+    elif args.command in ["plot", "plots", "visualize"]:
+        generate_all_plots(outputs_dir=args.outputs_dir)
+
+    elif args.command == "kfold":
+        run_kfold_experiment(
+            args.config,
+            n_splits=args.folds,
+            split_seed=args.seed,
+            force_retrain=args.force_retrain,
+        )
+
+    elif args.command == "kfold-all":
+        run_all_kfold_experiments(
+            config_paths=None,
+            n_splits=args.folds,
+            split_seed=args.seed,
+            force_retrain=args.force_retrain,
+        )
 
     elif args.command in ["all-in-one", "pipeline", "full-pipeline"]:
         config_paths = resolve_config_paths(args.configs)

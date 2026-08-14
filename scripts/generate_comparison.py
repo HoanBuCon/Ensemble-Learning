@@ -37,7 +37,13 @@ from src.utils.report import (
     extract_model_val_metrics,
     extract_model_training_time,
 )
-from src.utils.visualization import plot_comparison_bar
+from src.utils.visualization import (
+    plot_comparison_bar,
+    plot_per_class_comparison_heatmap,
+    plot_per_class_comparison_bar,
+    plot_radar_chart_comparison,
+    plot_model_tradeoffs,
+)
 
 
 def generate_base_comparison_report(
@@ -155,6 +161,43 @@ def generate_base_comparison_report(
 
     for metric in ["accuracy", "precision", "recall", "f1_score"]:
         plot_comparison_bar(metrics_dict, metric, outputs_dir)
+
+    # Per-class heatmaps, bars, and radar
+    try:
+        from src.utils.config import load_dataset_config
+        ds_cfg = load_dataset_config()
+        class_names = ds_cfg.get("classes", [])
+        all_models_per_class = {}
+        radar_data = {}
+
+        for m_dir in model_dirs:
+            base_name = re.sub(r"_\d+$", "", os.path.basename(m_dir))
+            m_path = os.path.join(m_dir, "metrics.json")
+            if os.path.exists(m_path):
+                with open(m_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                per_cls = d.get("per_class", {})
+                if per_cls:
+                    all_models_per_class[base_name] = per_cls
+                    radar_data[base_name] = [per_cls.get(c, {}).get("f1_score", 0.0) * 100.0 for c in class_names]
+
+        if all_models_per_class:
+            plot_per_class_comparison_heatmap(
+                all_models_per_class, metric="f1_score", class_names=class_names,
+                output_dir=outputs_dir, filename="comparison_per_class_heatmap.png"
+            )
+            plot_per_class_comparison_bar(
+                all_models_per_class, metric="f1_score", class_names=class_names,
+                output_dir=outputs_dir, filename="comparison_per_class_bar.png"
+            )
+        if radar_data:
+            plot_radar_chart_comparison(
+                radar_data, categories=class_names, output_dir=outputs_dir,
+                title="Disease Class F1-Score Radar Comparison (Base Models)",
+                filename="comparison_radar.png"
+            )
+    except Exception as e:
+        print(f"Warning: Per-class comparison plot generation failed: {e}")
 
     # Format percentage strings for Markdown & CSV output
     formatted_df = df.copy()

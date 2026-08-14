@@ -117,6 +117,7 @@ class CheckpointConfig:
     save_last: bool = True
     monitor: str = "val_accuracy"
     mode: str = "max"  # "max" for accuracy, "min" for loss
+    loss_gate_tolerance: float = 0.05  # Max allowed loss divergence (5%) when monitoring accuracy
 
 
 @dataclass
