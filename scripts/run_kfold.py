@@ -62,8 +62,9 @@ def run_all_kfold_experiments(
     n_splits: int = 5,
     split_seed: int = 42,
     force_retrain: bool = False,
+    eval_ensemble: bool = True,
 ) -> None:
-    """Run 5-Fold Cross Validation sequentially across all configured backbone models."""
+    """Run 5-Fold Cross Validation sequentially across all configured backbone models and evaluate Meta-Learners."""
     if not config_paths:
         config_paths = sorted(glob.glob("configs/*.yaml"))
         config_paths = [c for c in config_paths if not c.endswith("dataset.yaml")]
@@ -80,6 +81,16 @@ def run_all_kfold_experiments(
             split_seed=split_seed,
             force_retrain=force_retrain,
         )
+
+    if eval_ensemble:
+        print(f"\n{'='*75}")
+        print("  STEP 2: TRAINING META-LEARNERS & ENSEMBLE BENCHMARK (OOF MODE)")
+        print(f"{'='*75}\n")
+        try:
+            from scripts.run_ensemble_eval import run_ensemble_evaluation
+            run_ensemble_evaluation(mode="oof", outputs_dir="outputs")
+        except Exception as e:
+            print(f"Warning: Automatic ensemble evaluation failed: {e}")
 
 
 if __name__ == "__main__":
@@ -107,6 +118,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Force retrain all folds even if cached",
     )
+    parser.add_argument(
+        "--no-ensemble",
+        action="store_true",
+        help="Skip automatic Meta-Learner training after K-Fold completion",
+    )
     args = parser.parse_args()
 
     if args.configs:
@@ -123,4 +139,5 @@ if __name__ == "__main__":
             n_splits=args.folds,
             split_seed=args.seed,
             force_retrain=args.force_retrain,
+            eval_ensemble=not args.no_ensemble,
         )
