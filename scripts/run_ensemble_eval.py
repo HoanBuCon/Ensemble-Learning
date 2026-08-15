@@ -48,11 +48,16 @@ from src.utils.metrics import compute_metrics
 
 
 def get_latest_model_dirs(outputs_dir: str = "outputs") -> List[str]:
-    """Find latest directory for each base model in outputs_dir."""
+    """Find latest directory for each base model in outputs_dir (supports standard and kfold)."""
     all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
     valid_dirs = [
         d for d in all_dirs
-        if os.path.isdir(d) and os.path.exists(os.path.join(d, "probabilities.npy"))
+        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble"] and (
+            os.path.exists(os.path.join(d, "probabilities.npy"))
+            or os.path.exists(os.path.join(d, "test_probabilities.npy"))
+            or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
+            or os.path.exists(os.path.join(d, "kfold", "test_probabilities.npy"))
+        )
     ]
 
     model_groups: Dict[str, List[tuple[int, str]]] = {}
@@ -146,17 +151,23 @@ def run_ensemble_evaluation(
     class_mappings = []
     for d in model_dirs:
         cmap_path = os.path.join(d, "class_to_idx.json")
+        if not os.path.exists(cmap_path):
+            cmap_path = os.path.join(d, "kfold", "class_to_idx.json")
         if os.path.exists(cmap_path):
             with open(cmap_path, "r", encoding="utf-8") as f:
                 class_mappings.append(json.load(f))
-    EnsembleBase.validate_class_mappings(class_mappings)
+    if class_mappings:
+        EnsembleBase.validate_class_mappings(class_mappings)
 
     # Load test probabilities & labels
     base_test_probs_list = []
     base_test_labels = None
 
     for m_dir in model_dirs:
-        prob_path = os.path.join(m_dir, "test_probabilities.npy")
+        # Check kfold/test_probabilities.npy first, then root
+        prob_path = os.path.join(m_dir, "kfold", "test_probabilities.npy")
+        if not os.path.exists(prob_path):
+            prob_path = os.path.join(m_dir, "test_probabilities.npy")
         if not os.path.exists(prob_path):
             prob_path = os.path.join(m_dir, "probabilities.npy")
 
@@ -164,11 +175,27 @@ def run_ensemble_evaluation(
         if not os.path.exists(label_path):
             label_path = os.path.join(m_dir, "labels.npy")
 
-        probs = np.load(prob_path)
-        labels = np.load(label_path)
-        base_test_probs_list.append(probs)
-        if base_test_labels is None:
-            base_test_labels = labels
+        if os.path.exists(prob_path):
+            probs = np.load(prob_path)
+            base_test_probs_list.append(probs)
+
+        if base_test_labels is None and os.path.exists(label_path):
+            base_test_labels = np.load(label_path)
+
+    # Fallback to load test labels from dataset if missing in output folders
+    ds_cfg_raw = load_dataset_config()
+    ds_dict = ds_cfg_raw.get("dataset", ds_cfg_raw)
+    class_names = ds_dict.get("classes", [])
+
+    if base_test_labels is None:
+        from src.datasets.dataset import ImageFolderDataset
+        test_dir = ds_dict.get("test_dir", os.path.join(ds_dict.get("data_root", "./data"), "test"))
+        if not os.path.isdir(test_dir):
+            test_dir = os.path.join("data", "test")
+
+        if os.path.isdir(test_dir):
+            test_ds = ImageFolderDataset(root=test_dir)
+            base_test_labels = np.array([s[1] for s in test_ds.samples])
 
     test_labels = base_test_labels
 
@@ -189,21 +216,32 @@ def run_ensemble_evaluation(
     else: # mode == 'oof'
         meta_train_probs = []
         meta_train_labels = None
-        for m in base_models:
-            cfg_path = os.path.join("configs", f"{m}.yaml")
-            if not os.path.exists(cfg_path):
-                print(f"Config path for {m} not found at {cfg_path}. Skipping.")
-                continue
-            oof_gen = OOFGenerator(config=cfg_path)
-            oof_probs, oof_lbls, _ = oof_gen.generate()
-            meta_train_probs.append(oof_probs)
-            if meta_train_labels is None:
-                meta_train_labels = oof_lbls
+        for m_dir in model_dirs:
+            oof_p_path = os.path.join(m_dir, "kfold", "oof_probabilities.npy")
+            oof_l_path = os.path.join(m_dir, "kfold", "oof_labels.npy")
+            if not os.path.exists(oof_p_path):
+                oof_p_path = os.path.join(m_dir, "oof", "oof_probabilities.npy")
+                oof_l_path = os.path.join(m_dir, "oof", "oof_labels.npy")
+
+            if os.path.exists(oof_p_path) and os.path.exists(oof_l_path):
+                oof_probs = np.load(oof_p_path)
+                oof_lbls = np.load(oof_l_path)
+                meta_train_probs.append(oof_probs)
+                if meta_train_labels is None:
+                    meta_train_labels = oof_lbls
+            else:
+                m_name = re.sub(r"_\d+$", "", os.path.basename(m_dir))
+                cfg_path = os.path.join("configs", f"{m_name}.yaml")
+                if not os.path.exists(cfg_path):
+                    print(f"Config path for {m_name} not found at {cfg_path}. Skipping.")
+                    continue
+                oof_gen = OOFGenerator(config=cfg_path, output_dir=os.path.join(m_dir, "kfold"))
+                oof_probs, oof_lbls, _ = oof_gen.generate()
+                meta_train_probs.append(oof_probs)
+                if meta_train_labels is None:
+                    meta_train_labels = oof_lbls
 
     meta_test_probs = base_test_probs_list
-
-    ds_cfg = load_dataset_config()
-    class_names = ds_cfg.get("classes", [])
 
     # Single Model Baseline Results on Test Set
     single_model_results = []

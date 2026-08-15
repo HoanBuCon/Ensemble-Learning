@@ -280,6 +280,86 @@ def plot_confusion_matrix(
     plt.close(fig)
 
 
+def plot_ensemble_confusion_matrix_grid(
+    ensemble_cms: Dict[str, np.ndarray],
+    class_names: List[str],
+    output_dir: str,
+    filename: str = "ensemble_confusion_matrix_grid.png",
+) -> None:
+    """
+    Plot a 2x3 side-by-side comparative grid of normalized confusion matrices
+    for all 6 ensemble methods on the test set.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    if not ensemble_cms:
+        return
+
+    clean_labels = [c.replace("_", " ").title() for c in class_names]
+
+    # Target order
+    target_methods = [
+        "Hard Voting Ensemble",
+        "Stacking (Logistic Regression)",
+        "Stacking (Random Forest)",
+        "Soft Voting Ensemble",
+        "Weighted Voting Ensemble",
+        "Stacking (Xgboost)",
+    ]
+
+    available_methods = [m for m in target_methods if m in ensemble_cms]
+    if not available_methods:
+        available_methods = list(ensemble_cms.keys())[:6]
+
+    n_plots = len(available_methods)
+    n_rows = 2
+    n_cols = 3
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 12))
+    axes = axes.flatten()
+
+    for idx, m_name in enumerate(available_methods):
+        ax = axes[idx]
+        cm = ensemble_cms[m_name]
+
+        row_sums = cm.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        cm_norm = (cm.astype("float") / row_sums) * 100.0
+
+        sns.heatmap(
+            cm_norm,
+            annot=True,
+            fmt=".1f",
+            cmap="Blues",
+            cbar=False,
+            xticklabels=clean_labels,
+            yticklabels=clean_labels,
+            square=True,
+            linewidths=0.5,
+            linecolor="#E0E0E0",
+            ax=ax,
+            annot_kws={"size": 8.5, "weight": "bold"},
+        )
+
+        clean_title = m_name.replace(" Ensemble", "").replace("Stacking (", "Stacking: ").replace(")", "")
+        ax.set_title(clean_title, fontsize=12, fontweight="bold", pad=8)
+        ax.set_xlabel("Predicted Class", fontsize=9.5)
+        ax.set_ylabel("True Class" if idx % n_cols == 0 else "", fontsize=9.5)
+        ax.tick_params(axis="x", rotation=35, labelsize=8)
+        ax.tick_params(axis="y", rotation=0, labelsize=8)
+
+    # Hide unused subplots if any
+    for j in range(n_plots, len(axes)):
+        fig.delaxes(axes[j])
+
+    fig.suptitle(
+        "Tea Leaf Disease Diagnosis — Multi-Model Ensemble Confusion Matrix Comparison (Test Split %)",
+        fontsize=15, fontweight="bold", y=0.98
+    )
+    plt.tight_layout(rect=[0, 0.02, 1, 0.96])
+    fig.savefig(os.path.join(output_dir, filename))
+    plt.close(fig)
+
+
 # ==============================================================================
 # 3. Per-Disease Class Performance Visualizations
 # ==============================================================================
@@ -701,11 +781,12 @@ def plot_radar_chart_comparison(
     filename: str = "comparison_radar.png",
 ) -> None:
     """
-    Plot a Radar / Spider chart comparing models across all disease classes.
+    Plot a Radar / Spider chart comparing models across all disease classes with
+    high-contrast colors, distinct line styles, and zoomed radial scale.
     """
     os.makedirs(output_dir, exist_ok=True)
     N = len(categories)
-    if N < 3:
+    if N < 3 or not models_metrics:
         return
 
     angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
@@ -714,8 +795,21 @@ def plot_radar_chart_comparison(
     clean_categories = [c.replace("_", " ").title() for c in categories]
     clean_categories += clean_categories[:1]
 
-    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-    colors = DISTINCT_COLORS[:len(models_metrics)]
+    fig, ax = plt.subplots(figsize=(10, 9), subplot_kw=dict(polar=True))
+
+    # High-contrast color palette and line style mapping
+    style_presets = [
+        {"color": "#D62828", "linestyle": "-",  "linewidth": 2.6, "marker": "*", "markersize": 9},   # Crimson
+        {"color": "#003049", "linestyle": "-",  "linewidth": 2.3, "marker": "D", "markersize": 6},   # Deep Navy
+        {"color": "#F77F00", "linestyle": "-",  "linewidth": 2.3, "marker": "s", "markersize": 6},   # Orange
+        {"color": "#2A9D8F", "linestyle": "--", "linewidth": 2.0, "marker": "o", "markersize": 6},   # Teal
+        {"color": "#7209B7", "linestyle": "-.", "linewidth": 2.0, "marker": "^", "markersize": 6},   # Purple
+        {"color": "#4361EE", "linestyle": ":",  "linewidth": 2.0, "marker": "v", "markersize": 6},   # Royal Blue
+        {"color": "#2B9348", "linestyle": "--", "linewidth": 1.8, "marker": "p", "markersize": 6},   # Green
+        {"color": "#E76F51", "linestyle": "-.", "linewidth": 1.8, "marker": "h", "markersize": 6},   # Coral
+        {"color": "#4A4E69", "linestyle": ":",  "linewidth": 1.8, "marker": "X", "markersize": 6},   # Slate
+        {"color": "#C77DFF", "linestyle": "--", "linewidth": 1.8, "marker": "d", "markersize": 6},   # Lavender
+    ]
 
     min_val = 100.0
     for idx, (m_name, vals) in enumerate(models_metrics.items()):
@@ -724,15 +818,45 @@ def plot_radar_chart_comparison(
         min_val = min(min_val, min(values))
         values += values[:1]  # Close polygon
 
-        ax.plot(angles, values, "o-", linewidth=2.0, label=m_name, color=colors[idx % len(colors)], markersize=4)
-        ax.fill(angles, values, color=colors[idx % len(colors)], alpha=0.12)
+        st = style_presets[idx % len(style_presets)]
+        ax.plot(
+            angles, values,
+            linestyle=st["linestyle"],
+            linewidth=st["linewidth"],
+            marker=st["marker"],
+            markersize=st["markersize"],
+            label=m_name,
+            color=st["color"],
+            zorder=4,
+        )
+        ax.fill(angles, values, color=st["color"], alpha=0.04)
 
+    # Angular labels
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(clean_categories[:-1], fontsize=10.5, fontweight="semibold")
-    ax.set_ylim(max(75, min_val - 5), 101)
-    ax.set_title(title, fontsize=14, y=1.08)
-    ax.legend(loc="upper right", bbox_to_anchor=(1.25, 1.1), frameon=True, fontsize=9)
-    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_xticklabels(clean_categories[:-1], fontsize=11, fontweight="bold")
+
+    # Zoomed Radial Scale to separate close scores in 92%-100% range
+    r_min = max(88.0, np.floor(min_val - 2.0))
+    r_max = 100.5
+    ax.set_ylim(r_min, r_max)
+    ax.set_yticks(np.arange(r_min, 101.0, 2.0))
+    ax.set_yticklabels([f"{int(y)}%" if y == int(y) else f"{y:.1f}%" for y in np.arange(r_min, 101.0, 2.0)], fontsize=9, color="#555555")
+
+    ax.set_title(title, fontsize=14, fontweight="bold", y=1.09, pad=16)
+    ax.grid(True, linestyle="--", alpha=0.5, color="#BBBBBB")
+    ax.set_axisbelow(False)
+
+    # Position legend cleanly on the right
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.15, 1.05),
+        frameon=True,
+        facecolor="white",
+        edgecolor="#CCCCCC",
+        fontsize=9.5,
+        title="Evaluated Methods",
+        title_fontsize=10.5,
+    )
 
     fig.savefig(os.path.join(output_dir, filename))
     plt.close(fig)
@@ -752,11 +876,12 @@ def plot_model_tradeoffs(
         return
 
     names = [d["Model"] for d in models_data]
-    params_m = [d.get("Parameters_M", 0.0) for d in models_data]
-    accs = [d.get("Test_Accuracy", 0.0) for d in models_data]
-    latencies = [max(10, d.get("Inference_Time_s", 20) * 12) for d in models_data]
+    params_m = [float(d.get("Parameters_M", 0.0)) for d in models_data]
+    raw_accs = [float(d.get("Test_Accuracy", 0.0)) for d in models_data]
+    accs = [v * 100.0 if v <= 1.0 else v for v in raw_accs]
+    latencies = [max(80, min(350, d.get("Inference_Time_s", 20) * 10)) for d in models_data]
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(10, 6.5))
 
     colors = []
     for n in names:
@@ -767,25 +892,82 @@ def plot_model_tradeoffs(
         else:
             colors.append("#2E86AB")
 
-    scatter = ax.scatter(
+    ax.scatter(
         params_m, accs, s=latencies, c=colors,
-        alpha=0.85, edgecolors="black", linewidth=1.2
+        alpha=0.85, edgecolors="black", linewidth=1.2, zorder=4,
     )
 
-    for i, name in enumerate(names):
+    # Smart label positioning to prevent overlapping
+    offsets = [
+        (-12, 10), (8, -12), (10, 8), (-15, -15),
+        (10, 10), (-20, 12), (12, -10), (10, -18),
+        (-25, -10), (10, 12)
+    ]
+
+    for i, (name, x, y) in enumerate(zip(names, params_m, accs)):
+        ox, oy = offsets[i % len(offsets)]
+        # Special manual adjustments for closely grouped ensemble points
+        if "Hard Voting" in name:
+            ox, oy = (-80, 10)
+        elif "Logistic Regression" in name:
+            ox, oy = (-120, -14)
+        elif "Random Forest" in name:
+            ox, oy = (12, 6)
+        elif "Soft Voting" in name:
+            ox, oy = (-75, -16)
+        elif "Weighted Voting" in name:
+            ox, oy = (12, -14)
+
         ax.annotate(
-            name,
-            (params_m[i], accs[i]),
-            xytext=(6, 5),
+            f"{name} ({y:.2f}%)",
+            (x, y),
+            xytext=(ox, oy),
             textcoords="offset points",
             fontsize=9.5,
-            fontweight="bold"
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="gray", alpha=0.85, lw=0.6),
+            arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color="gray", lw=0.8),
+            zorder=5,
         )
 
-    ax.set_xlabel("Model Parameters (Million)", fontsize=12)
-    ax.set_ylabel("Test Accuracy (%)", fontsize=12)
-    ax.set_title("Model Trade-off: Accuracy vs Model Complexity & Latency", fontsize=14)
-    ax.grid(True, alpha=0.35, linestyle="--")
+    # Plot Pareto Frontier line
+    # Sort points by params ascending
+    sorted_pts = sorted(zip(params_m, accs, names), key=lambda p: p[0])
+    pareto_pts = []
+    max_acc = -1.0
+    for p_x, p_y, p_n in sorted_pts:
+        if p_y > max_acc:
+            pareto_pts.append((p_x, p_y))
+            max_acc = p_y
+
+    if len(pareto_pts) >= 2:
+        px_coords, py_coords = zip(*pareto_pts)
+        ax.plot(
+            px_coords, py_coords, "r--", linewidth=1.8, alpha=0.75,
+            label="Pareto Optimal Frontier", zorder=3,
+        )
+
+    min_y = min(accs) - 0.3 if accs else 95.0
+    max_y = max(accs) + 0.3 if accs else 98.5
+    min_x = min(params_m) - 2.0 if params_m else 0.0
+    max_x = max(params_m) + 8.0 if params_m else 70.0
+
+    ax.set_ylim(min_y, max_y)
+    ax.set_xlim(max(0, min_x), max_x)
+    ax.set_xlabel("Model Parameters (Million - M)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Test Accuracy (%)", fontsize=12, fontweight="bold")
+    ax.set_title("Model Trade-off: Accuracy vs Model Complexity (Pareto Efficiency)", fontsize=14, pad=12)
+    ax.grid(True, alpha=0.35, linestyle="--", zorder=1)
+
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Patch(facecolor="#2E86AB", edgecolor="black", label="Base Backbone"),
+        Patch(facecolor="#2A9D8F", edgecolor="black", label="Voting Ensemble"),
+        Patch(facecolor="#F77F00", edgecolor="black", label="Stacking Ensemble"),
+        Line2D([0], [0], color="r", linestyle="--", linewidth=1.8, label="Pareto Frontier"),
+    ]
+    ax.legend(handles=legend_elements, loc="lower right", frameon=True, fontsize=9.5)
 
     fig.savefig(os.path.join(output_dir, filename))
     plt.close(fig)

@@ -88,7 +88,7 @@ class OOFGenerator:
         self.force_retrain = force_retrain
         self.device = torch.device(config.device)
         self.output_dir = output_dir or os.path.join(
-            config.checkpoint.save_dir, "oof"
+            config.checkpoint.save_dir, "kfold"
         )
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -384,7 +384,7 @@ class OOFGenerator:
 
         summary_csv = os.path.join(self.output_dir, "kfold_summary.csv")
         summary_md = os.path.join(self.output_dir, "kfold_summary.md")
-        formatted_df.to_csv(summary_csv, index=False)
+        formatted_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
         with open(summary_md, "w", encoding="utf-8") as f:
             f.write(f"# 5-Fold Cross-Validation Performance Summary ({cfg.model.name})\n\n")
             f.write(formatted_df.to_markdown(index=False))
