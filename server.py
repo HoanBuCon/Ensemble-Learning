@@ -9,6 +9,10 @@ FastAPI server supporting 5 flexible classification modes:
 4. All Ensemble Methods (Simultaneous comparison of 6 ensemble methods)
 5. Full Benchmark (All 4 Base Models + All 6 Ensemble Methods = 10 methods per image)
 
+Supports both:
+- Single-Split standard training outputs (outputs/<model_name>/best_model.pth)
+- 5-Fold Cross-Validation / OOF outputs (outputs/<model_name>/kfold/fold_*/best_model.pth)
+
 Run server:
     python server.py
     # or: python main.py serve
@@ -20,6 +24,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 import time
 from typing import Dict, List, Optional, Any, Tuple
@@ -45,7 +50,14 @@ from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsembl
 from src.utils.config import load_config, load_dataset_config
 
 DATASET_CONFIG = load_dataset_config()
-DEFAULT_CLASS_NAMES = DATASET_CONFIG.get("classes", [])
+DEFAULT_CLASS_NAMES = DATASET_CONFIG.get("classes", [
+    "Brown_Blight",
+    "Gray_Blight",
+    "Green_mirid_bug",
+    "Healthy_leaf",
+    "Helopeltis",
+    "Tea_algal_leaf_spot",
+])
 
 BASE_MODEL_KEYS = ["resnet50", "densenet121", "efficientnet_b0", "swin_tiny"]
 ENSEMBLE_KEYS = [
@@ -93,6 +105,17 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_MODELS: Dict[str, torch.nn.Module] = {}
 CLASS_NAMES: List[str] = DEFAULT_CLASS_NAMES
 ENSEMBLE_MODELS: Dict[str, Any] = {}
+LOADED_MODEL_INFO: Dict[str, str] = {}
+
+
+def get_possible_output_dirs() -> List[str]:
+    """Return prioritized list of output directories."""
+    candidates = [
+        os.path.join(PROJECT_ROOT, "outputs"),
+        os.path.join(PROJECT_ROOT, "OOF_Results", "outputs"),
+        os.path.join(PROJECT_ROOT, "Default_Results", "outputs"),
+    ]
+    return [d for d in candidates if os.path.isdir(d)]
 
 
 def get_preprocess_transform(image_size: int = 224) -> A.Compose:
@@ -103,35 +126,101 @@ def get_preprocess_transform(image_size: int = 224) -> A.Compose:
     ])
 
 
-def load_all_base_models():
-    """Load and cache all 4 base models on startup."""
-    global CLASS_NAMES
-    for name in BASE_MODEL_KEYS:
-        possible_dirs = sorted(glob.glob(os.path.join("outputs", f"{name}*")))
-        valid_dir = None
+def find_model_checkpoint(name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Find best checkpoint path, class mapping path, and description info for a base model.
+    Supports both Single Split ('best_model.pth') and 5-Fold OOF ('kfold/fold_*/best_model.pth').
+    """
+    for out_dir in get_possible_output_dirs():
+        possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{name}*")))
         for d in possible_dirs:
-            if os.path.exists(os.path.join(d, "best_model.pth")):
-                valid_dir = d
-                break
+            # 1. Check direct single-split checkpoint
+            direct_pth = os.path.join(d, "best_model.pth")
+            cmap_path = os.path.join(d, "class_to_idx.json")
+            if not os.path.exists(cmap_path):
+                cmap_path = os.path.join(d, "kfold", "class_to_idx.json")
+            cmap = cmap_path if os.path.exists(cmap_path) else None
 
-        if not valid_dir:
+            if os.path.exists(direct_pth):
+                return direct_pth, cmap, "Single Split Checkpoint"
+
+            # 2. Check 5-Fold OOF directory
+            kfold_dir = os.path.join(d, "kfold")
+            if os.path.isdir(kfold_dir):
+                if not cmap:
+                    k_cmap = os.path.join(kfold_dir, "class_to_idx.json")
+                    if os.path.exists(k_cmap):
+                        cmap = k_cmap
+
+                folds = sorted(glob.glob(os.path.join(kfold_dir, "fold_*")))
+                best_fold_pth = None
+                best_acc = -1.0
+                best_fold_name = None
+
+                for f in folds:
+                    pth = os.path.join(f, "best_model.pth")
+                    if not os.path.exists(pth):
+                        continue
+                    m_json = os.path.join(f, "metrics.json")
+                    acc = 0.0
+                    if os.path.exists(m_json):
+                        try:
+                            with open(m_json, "r", encoding="utf-8") as fp:
+                                acc = json.load(fp).get("accuracy", 0.0)
+                        except Exception:
+                            pass
+                    if acc > best_acc or best_fold_pth is None:
+                        best_acc = acc
+                        best_fold_pth = pth
+                        best_fold_name = os.path.basename(f)
+
+                if best_fold_pth:
+                    info = f"5-Fold OOF ({best_fold_name}" + (f", Acc: {best_acc*100:.2f}%)" if best_acc > 0 else ")")
+                    return best_fold_pth, cmap, info
+
+    return None, None, None
+
+
+def load_all_base_models():
+    """Load and cache all 4 base models on startup, supporting both standard and OOF checkpoints."""
+    global CLASS_NAMES, BASE_MODELS, LOADED_MODEL_INFO
+    BASE_MODELS.clear()
+    LOADED_MODEL_INFO.clear()
+
+    print(f"\n{'='*70}")
+    print(f"   LOADING BASE COMPUTER VISION MODELS (Device: {DEVICE})")
+    print(f"{'='*70}")
+
+    for name in BASE_MODEL_KEYS:
+        weights_path, cmap_path, info_str = find_model_checkpoint(name)
+
+        if not weights_path or not os.path.exists(weights_path):
+            print(f"  [!] {BASE_DISPLAY_NAMES.get(name, name)}: No checkpoint found. Skipping.")
             continue
 
-        cmap_path = os.path.join(valid_dir, "class_to_idx.json")
-        if os.path.exists(cmap_path):
-            with open(cmap_path, "r", encoding="utf-8") as f:
-                cmap = json.load(f)
-                CLASS_NAMES = [k for k, _ in sorted(cmap.items(), key=lambda item: item[1])]
+        if cmap_path and os.path.exists(cmap_path):
+            try:
+                with open(cmap_path, "r", encoding="utf-8") as f:
+                    cmap = json.load(f)
+                    CLASS_NAMES = [k for k, _ in sorted(cmap.items(), key=lambda item: item[1])]
+            except Exception:
+                pass
 
-        model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
-        weights_path = os.path.join(valid_dir, "best_model.pth")
-        checkpoint = torch.load(weights_path, map_location=DEVICE, weights_only=False)
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
-        model.load_state_dict(state_dict)
-        model.to(DEVICE)
-        model.eval()
+        try:
+            model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
+            checkpoint = torch.load(weights_path, map_location=DEVICE, weights_only=False)
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+            model.load_state_dict(state_dict)
+            model.to(DEVICE)
+            model.eval()
 
-        BASE_MODELS[name] = model
+            BASE_MODELS[name] = model
+            LOADED_MODEL_INFO[name] = info_str or "Loaded"
+            print(f"  [+] {BASE_DISPLAY_NAMES.get(name, name):<24} -> {weights_path} [{info_str}]")
+        except Exception as e:
+            print(f"  [X] Failed to load {name} from {weights_path}: {e}")
+
+    print(f"Loaded {len(BASE_MODELS)}/{len(BASE_MODEL_KEYS)} base models successfully.\n")
 
 
 def init_ensemble_models():
@@ -141,25 +230,43 @@ def init_ensemble_models():
 
     available_models = [m for m in BASE_MODEL_KEYS if m in BASE_MODELS]
     if len(available_models) < 2:
+        print(f"Ensemble initialization skipped (requires at least 2 loaded base models).")
         return
 
+    output_dirs = get_possible_output_dirs()
+
+    # Search for training probabilities for each available model
     for m_name in available_models:
-        possible_dirs = sorted(glob.glob(os.path.join("outputs", f"{m_name}*")))
-        valid_dir = possible_dirs[0] if possible_dirs else os.path.join("outputs", m_name)
-        
-        prob_path = os.path.join(valid_dir, "val_probabilities.npy")
-        label_path = os.path.join(valid_dir, "val_labels.npy")
+        found_p, found_l = None, None
+        for out_dir in output_dirs:
+            possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{m_name}*")))
+            for d in possible_dirs:
+                # Priority 1: 5-Fold OOF probabilities
+                candidates = [
+                    (os.path.join(d, "kfold", "oof_probabilities.npy"), os.path.join(d, "kfold", "oof_labels.npy")),
+                    (os.path.join(d, "oof", "oof_probabilities.npy"), os.path.join(d, "oof", "oof_labels.npy")),
+                    (os.path.join(d, "val_probabilities.npy"), os.path.join(d, "val_labels.npy")),
+                    (os.path.join(d, "kfold", "test_probabilities.npy"), os.path.join(d, "kfold", "oof_labels.npy")),
+                    (os.path.join(d, "probabilities.npy"), os.path.join(d, "labels.npy")),
+                ]
+                for p_cand, l_cand in candidates:
+                    if os.path.exists(p_cand) and os.path.exists(l_cand):
+                        found_p = np.load(p_cand)
+                        found_l = np.load(l_cand)
+                        break
+                if found_p is not None:
+                    break
+            if found_p is not None:
+                break
 
-        if not os.path.exists(prob_path):
-            prob_path = os.path.join(valid_dir, "probabilities.npy")
-            label_path = os.path.join(valid_dir, "labels.npy")
-
-        if os.path.exists(prob_path) and os.path.exists(label_path):
-            fit_probs_list.append(np.load(prob_path))
+        if found_p is not None and found_l is not None:
+            fit_probs_list.append(found_p)
             if fit_labels is None:
-                fit_labels = np.load(label_path)
+                fit_labels = found_l
 
     if len(fit_probs_list) == len(available_models) and fit_labels is not None:
+        print(f"--> Initializing and fitting Ensemble models on {len(fit_labels)} validation/OOF samples...")
+
         # 1. Hard Voting
         ENSEMBLE_MODELS["hard_voting"] = HardVoting()
 
@@ -167,27 +274,68 @@ def init_ensemble_models():
         ENSEMBLE_MODELS["soft_voting"] = SoftVoting()
 
         # 3. Weighted Voting
-        wv = WeightedVoting()
-        wv.fit(fit_probs_list, fit_labels)
+        opt_weights = None
+        for out_dir in output_dirs:
+            for sub in ["oof", "val", ""]:
+                comp_csv = os.path.join(out_dir, sub, "ensemble_comparison.csv")
+                if os.path.exists(comp_csv):
+                    try:
+                        import pandas as pd
+                        df = pd.read_csv(comp_csv)
+                        for _, row in df.iterrows():
+                            if "Weighted Voting" in str(row.get("Method", "")):
+                                details = str(row.get("Details", ""))
+                                parsed_w = []
+                                for m in available_models:
+                                    match = re.search(rf"{m}:\s*([\d\.]+)", details)
+                                    if match:
+                                        parsed_w.append(float(match.group(1)))
+                                if len(parsed_w) == len(available_models):
+                                    opt_weights = parsed_w
+                                break
+                    except Exception:
+                        pass
+                if opt_weights:
+                    break
+            if opt_weights:
+                break
+
+        if opt_weights:
+            print(f"  [Weighted Voting] Loaded precomputed optimal weights: {opt_weights}")
+            wv = WeightedVoting(weights=opt_weights)
+        else:
+            wv = WeightedVoting(grid_resolution=6)
+            wv.fit(fit_probs_list, fit_labels)
+            print(f"  [Weighted Voting] Optimized weights via grid search: {wv.weights}")
         ENSEMBLE_MODELS["weighted_voting"] = wv
 
         # 4. Stacking Logistic Regression
         st_lr = StackingEnsemble(meta_learner="logistic_regression")
         st_lr.fit(fit_probs_list, fit_labels)
         ENSEMBLE_MODELS["stacking_logistic"] = st_lr
+        print(f"  [Stacking LR] Meta-Learner fitted.")
 
         # 5. Stacking Random Forest
         st_rf = StackingEnsemble(meta_learner="random_forest")
         st_rf.fit(fit_probs_list, fit_labels)
         ENSEMBLE_MODELS["stacking_rf"] = st_rf
+        print(f"  [Stacking RF] Meta-Learner fitted.")
 
         # 6. Stacking XGBoost
         try:
             st_xgb = StackingEnsemble(meta_learner="xgboost")
             st_xgb.fit(fit_probs_list, fit_labels)
             ENSEMBLE_MODELS["stacking_xgb"] = st_xgb
-        except Exception:
-            pass
+            print(f"  [Stacking XGBoost] Meta-Learner fitted.")
+        except Exception as e:
+            print(f"  [Stacking XGBoost] Skipped: {e}")
+
+        print(f"Ensemble models ready: {list(ENSEMBLE_MODELS.keys())}\n")
+    else:
+        # Fallback to zero-training voting methods
+        ENSEMBLE_MODELS["hard_voting"] = HardVoting()
+        ENSEMBLE_MODELS["soft_voting"] = SoftVoting()
+        print(f"Fallback: Initialized HardVoting and SoftVoting (zero-fit).")
 
 
 @app.on_event("startup")
@@ -227,6 +375,9 @@ def compute_ensemble_predictions(
         Tuple of (predicted_class_indices, probability_matrix_or_None)
     """
     probs_list = [base_probs_map[m] for m in BASE_MODEL_KEYS if m in base_probs_map]
+
+    if not probs_list:
+        raise ValueError("No base model probabilities available to compute ensemble.")
 
     if ensemble_key == "hard_voting":
         hv = ENSEMBLE_MODELS.get("hard_voting", HardVoting())
@@ -269,7 +420,12 @@ def get_pipeline_config():
     """Return available base models, ensemble models, and system status."""
     return {
         "base_models": [
-            {"id": k, "name": BASE_DISPLAY_NAMES.get(k, k), "loaded": k in BASE_MODELS}
+            {
+                "id": k,
+                "name": BASE_DISPLAY_NAMES.get(k, k),
+                "loaded": k in BASE_MODELS,
+                "info": LOADED_MODEL_INFO.get(k, "Not loaded"),
+            }
             for k in BASE_MODEL_KEYS
         ],
         "ensemble_methods": [
@@ -305,7 +461,10 @@ async def predict(
         raise HTTPException(status_code=400, detail="No image files uploaded.")
 
     if not BASE_MODELS:
-        raise HTTPException(status_code=500, detail="No base models loaded. Please train models first.")
+        raise HTTPException(
+            status_code=500,
+            detail="No base models loaded. Please train models first or verify outputs/ directory."
+        )
 
     transform = get_preprocess_transform(image_size=224)
     start_total_time = time.time()
@@ -382,7 +541,6 @@ async def predict(
 
         # Extract Ensemble Predictions for this image
         for e_key in run_ensemble_keys:
-            # Single sample sub-map
             single_base_map = {k: v[img_idx:img_idx+1] for k, v in base_probs.items()}
             preds, probs_mat = compute_ensemble_predictions(single_base_map, e_key)
 
@@ -395,7 +553,7 @@ async def predict(
                 conf = float(probs[pred_class_idx] * 100)
                 prob_dict = {cls: float(probs[i] * 100) for i, cls in enumerate(CLASS_NAMES)}
             else:
-                conf = 100.0  # Majority vote confidence placeholder
+                conf = 100.0  # Majority vote placeholder
 
             img_result["predictions"][e_key] = {
                 "name": ENSEMBLE_DISPLAY_NAMES.get(e_key, e_key),
@@ -429,21 +587,19 @@ async def predict(
 @app.get("/api/v1/analytics")
 def get_analytics():
     """Retrieve full model evaluation metrics, per-class metrics, and epoch history for interactive charts."""
-    outputs_dir = os.path.join(PROJECT_ROOT, "outputs")
     ds_cfg = load_dataset_config()
     analytics_data = {
         "status": "success",
         "dataset_info": ds_cfg,
-        "class_names": ds_cfg.get("classes", []),
+        "class_names": ds_cfg.get("classes", DEFAULT_CLASS_NAMES),
         "class_display_names": ds_cfg.get("display_names", {}),
         "base_models": {},
+        "ensemble_models": {},
     }
 
-    for model_key in BASE_MODEL_KEYS:
-        model_dir = os.path.join(outputs_dir, model_key)
-        metrics_file = os.path.join(model_dir, "metrics.json")
-        history_file = os.path.join(model_dir, "history.csv")
+    output_dirs = get_possible_output_dirs()
 
+    for model_key in BASE_MODEL_KEYS:
         model_info = {
             "name": BASE_DISPLAY_NAMES.get(model_key, model_key),
             "key": model_key,
@@ -455,31 +611,59 @@ def get_analytics():
             "history": [],
         }
 
-        # Read metrics.json
-        if os.path.exists(metrics_file):
-            try:
-                with open(metrics_file, "r") as f:
-                    m_json = json.load(f)
-                    model_info["accuracy"] = round(m_json.get("accuracy", 0) * 100, 2)
-                    model_info["precision"] = round(m_json.get("precision", 0) * 100, 2)
-                    model_info["recall"] = round(m_json.get("recall", 0) * 100, 2)
-                    model_info["f1_score"] = round(m_json.get("f1_score", 0) * 100, 2)
+        found_metrics = None
+        found_history = None
 
-                    per_class_raw = m_json.get("per_class", {})
-                    for c_name, c_metrics in per_class_raw.items():
-                        model_info["per_class"][c_name] = {
-                            "precision": round(c_metrics.get("precision", 0) * 100, 2),
-                            "recall": round(c_metrics.get("recall", 0) * 100, 2),
-                            "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
-                        }
-            except Exception as e:
-                print(f"Error reading metrics.json for {model_key}: {e}")
+        for out_dir in output_dirs:
+            possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{model_key}*")))
+            for d in possible_dirs:
+                # Metrics candidates (OOF, Root, Folds)
+                m_cands = [
+                    os.path.join(d, "kfold", "oof_metrics.json"),
+                    os.path.join(d, "metrics.json"),
+                    os.path.join(d, "kfold", "fold_1", "metrics.json"),
+                    os.path.join(d, "val_evaluation", "metrics.json"),
+                ]
+                for mc in m_cands:
+                    if os.path.exists(mc) and found_metrics is None:
+                        try:
+                            with open(mc, "r", encoding="utf-8") as f:
+                                found_metrics = json.load(f)
+                                break
+                        except Exception:
+                            pass
 
-        # Read history.csv
-        if os.path.exists(history_file):
+                # History candidates
+                h_cands = [
+                    os.path.join(d, "kfold", "fold_1", "history.csv"),
+                    os.path.join(d, "history.csv"),
+                ]
+                for hc in h_cands:
+                    if os.path.exists(hc) and found_history is None:
+                        found_history = hc
+                        break
+
+            if found_metrics and found_history:
+                break
+
+        if found_metrics:
+            model_info["accuracy"] = round(found_metrics.get("accuracy", 0) * 100, 2)
+            model_info["precision"] = round(found_metrics.get("precision", 0) * 100, 2)
+            model_info["recall"] = round(found_metrics.get("recall", 0) * 100, 2)
+            model_info["f1_score"] = round(found_metrics.get("f1_score", 0) * 100, 2)
+
+            per_class_raw = found_metrics.get("per_class", {})
+            for c_name, c_metrics in per_class_raw.items():
+                model_info["per_class"][c_name] = {
+                    "precision": round(c_metrics.get("precision", 0) * 100, 2),
+                    "recall": round(c_metrics.get("recall", 0) * 100, 2),
+                    "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
+                }
+
+        if found_history:
             try:
                 import pandas as pd
-                df = pd.read_csv(history_file)
+                df = pd.read_csv(found_history)
                 for _, row in df.iterrows():
                     val_acc_raw = float(row.get("val_acc", 0))
                     val_acc_val = round(val_acc_raw * 100, 2) if val_acc_raw <= 1.0 else round(val_acc_raw, 2)
@@ -490,146 +674,76 @@ def get_analytics():
                         "val_acc": val_acc_val,
                     })
             except Exception as e:
-                print(f"Error reading history.csv for {model_key}: {e}")
+                print(f"Error reading history for {model_key}: {e}")
 
         analytics_data["base_models"][model_key] = model_info
 
-    # Read Ensemble Metrics from outputs/val/ensemble_comparison.csv
-    analytics_data["ensemble_models"] = {}
-    ensemble_csv = os.path.join(outputs_dir, "val", "ensemble_comparison.csv")
-    if os.path.exists(ensemble_csv):
-        try:
-            import pandas as pd
-            df_ens = pd.read_csv(ensemble_csv)
-            for _, row in df_ens.iterrows():
-                method_name = str(row.get("Method", ""))
-                method_type = str(row.get("Type", ""))
-                if "Ensemble" in method_type or "Stacking" in method_type or "Voting" in method_type:
-                    acc_str = str(row.get("Accuracy", "0")).replace("%", "").strip()
-                    prec_str = str(row.get("Precision", "0")).replace("%", "").strip()
-                    rec_str = str(row.get("Recall", "0")).replace("%", "").strip()
-                    f1_str = str(row.get("F1_Score", "0")).replace("%", "").strip()
-                    imp_str = str(row.get("Improvement", "0")).replace("%", "").replace("+", "").strip()
-                    
-                    try:
-                        imp_val = float(imp_str) if "Base" not in imp_str else 0.0
-                    except ValueError:
-                        imp_val = 0.0
+    # Read Ensemble Metrics from ensemble_comparison.csv (check oof -> val -> root)
+    for out_dir in output_dirs:
+        for sub in ["oof", "val", ""]:
+            ensemble_csv = os.path.join(out_dir, sub, "ensemble_comparison.csv")
+            if os.path.exists(ensemble_csv):
+                try:
+                    import pandas as pd
+                    df_ens = pd.read_csv(ensemble_csv)
+                    for _, row in df_ens.iterrows():
+                        method_name = str(row.get("Method", ""))
+                        method_type = str(row.get("Type", ""))
+                        if "Ensemble" in method_type or "Stacking" in method_type or "Voting" in method_type:
+                            acc_str = str(row.get("Accuracy", "0")).replace("%", "").strip()
+                            prec_str = str(row.get("Precision", "0")).replace("%", "").strip()
+                            rec_str = str(row.get("Recall", "0")).replace("%", "").strip()
+                            f1_str = str(row.get("F1_Score", "0")).replace("%", "").strip()
+                            imp_str = str(row.get("Improvement", "0")).replace("%", "").replace("+", "").strip()
 
-                    analytics_data["ensemble_models"][method_name] = {
-                        "name": method_name,
-                        "type": method_type,
-                        "accuracy": float(acc_str),
-                        "precision": float(prec_str),
-                        "recall": float(rec_str),
-                        "f1_score": float(f1_str),
-                        "improvement": imp_val,
-                        "details": str(row.get("Details", "")),
-                        "per_class": {},
-                    }
-        except Exception as e:
-            print(f"Error reading ensemble_comparison.csv: {e}")
+                            try:
+                                imp_val = float(imp_str) if "Base" not in imp_str else 0.0
+                            except ValueError:
+                                imp_val = 0.0
 
-    # Read exact per-class metrics from ensemble_full_metrics.json if available, or compute fallback
-    full_json_path = os.path.join(outputs_dir, "val", "ensemble_full_metrics.json")
-    if os.path.exists(full_json_path):
-        try:
-            with open(full_json_path, "r", encoding="utf-8") as f:
-                full_json = json.load(f)
-                for ens_name in analytics_data["ensemble_models"]:
-                    if ens_name in full_json:
-                        per_cls_raw = full_json[ens_name].get("per_class", {})
-                        per_cls_dict = {}
-                        for c_name, c_metrics in per_cls_raw.items():
-                            per_cls_dict[c_name] = {
-                                "precision": round(c_metrics.get("precision", 0) * 100, 2),
-                                "recall": round(c_metrics.get("recall", 0) * 100, 2),
-                                "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
+                            analytics_data["ensemble_models"][method_name] = {
+                                "name": method_name,
+                                "type": method_type,
+                                "accuracy": float(acc_str),
+                                "precision": float(prec_str),
+                                "recall": float(rec_str),
+                                "f1_score": float(f1_str),
+                                "improvement": imp_val,
+                                "details": str(row.get("Details", "")),
+                                "per_class": {},
                             }
-                        analytics_data["ensemble_models"][ens_name]["per_class"] = per_cls_dict
-        except Exception as e:
-            print(f"Error reading ensemble_full_metrics.json: {e}")
-    else:
-        # Fallback dynamic calculation
-        try:
-            import numpy as np
-            from sklearn.metrics import classification_report
-            from sklearn.linear_model import LogisticRegression
-            from sklearn.ensemble import RandomForestClassifier
-            import xgboost as xgb
+                    if analytics_data["ensemble_models"]:
+                        break
+                except Exception as e:
+                    print(f"Error reading ensemble_comparison.csv: {e}")
+        if analytics_data["ensemble_models"]:
+            break
 
-            base_test_probs = []
-            base_val_probs = []
-            test_labels = None
-            val_labels = None
-
-            for k in BASE_MODEL_KEYS:
-                t_prob_p = os.path.join(outputs_dir, k, "test_probabilities.npy")
-                if not os.path.exists(t_prob_p):
-                    t_prob_p = os.path.join(outputs_dir, k, "probabilities.npy")
-                
-                t_lbl_p = os.path.join(outputs_dir, k, "test_labels.npy")
-                if not os.path.exists(t_lbl_p):
-                    t_lbl_p = os.path.join(outputs_dir, k, "labels.npy")
-                
-                v_prob_p = os.path.join(outputs_dir, k, "val_probabilities.npy")
-                v_lbl_p = os.path.join(outputs_dir, k, "val_labels.npy")
-
-                if os.path.exists(t_prob_p) and os.path.exists(t_lbl_p):
-                    base_test_probs.append(np.load(t_prob_p))
-                    if test_labels is None:
-                        test_labels = np.load(t_lbl_p)
-
-                if os.path.exists(v_prob_p) and os.path.exists(v_lbl_p):
-                    base_val_probs.append(np.load(v_prob_p))
-                    if val_labels is None:
-                        val_labels = np.load(v_lbl_p)
-
-            if len(base_test_probs) == 4 and test_labels is not None:
-                hv_preds = np.argmax(np.sum([np.eye(6)[np.argmax(p, axis=1)] for p in base_test_probs], axis=0), axis=1)
-                sv_preds = np.argmax(np.mean(base_test_probs, axis=0), axis=1)
-                weights = [0.08, 0.23, 0.38, 0.31]
-                wv_probs = np.zeros_like(base_test_probs[0])
-                for w, p in zip(weights, base_test_probs):
-                    wv_probs += w * p
-                wv_preds = np.argmax(wv_probs, axis=1)
-
-                ensemble_preds_map = {
-                    "Hard Voting Ensemble": hv_preds,
-                    "Soft Voting Ensemble": sv_preds,
-                    "Weighted Voting Ensemble": wv_preds,
-                }
-
-                if len(base_val_probs) == 4 and val_labels is not None:
-                    X_train = np.hstack(base_val_probs)
-                    X_test = np.hstack(base_test_probs)
-
-                    lr = LogisticRegression(max_iter=1000, random_state=42)
-                    lr.fit(X_train, val_labels)
-                    ensemble_preds_map["Stacking (Logistic Regression)"] = lr.predict(X_test)
-
-                    rf = RandomForestClassifier(n_estimators=100, random_state=42)
-                    rf.fit(X_train, val_labels)
-                    ensemble_preds_map["Stacking (Random Forest)"] = rf.predict(X_test)
-
-                    xgb_cls = xgb.XGBClassifier(n_estimators=100, random_state=42, eval_metric="mlogloss")
-                    xgb_cls.fit(X_train, val_labels)
-                    ensemble_preds_map["Stacking (Xgboost)"] = xgb_cls.predict(X_test)
-
-                for ens_name, p_preds in ensemble_preds_map.items():
-                    if ens_name in analytics_data["ensemble_models"]:
-                        rep = classification_report(test_labels, p_preds, target_names=DEFAULT_CLASS_NAMES, output_dict=True, zero_division=0)
-                        per_cls_dict = {}
-                        for c_name in DEFAULT_CLASS_NAMES:
-                            if c_name in rep:
-                                per_cls_dict[c_name] = {
-                                    "precision": round(rep[c_name]["precision"] * 100, 2),
-                                    "recall": round(rep[c_name]["recall"] * 100, 2),
-                                    "f1_score": round(rep[c_name]["f1-score"] * 100, 2),
-                                }
-                        analytics_data["ensemble_models"][ens_name]["per_class"] = per_cls_dict
-        except Exception as e:
-            print(f"Error computing ensemble per-class metrics: {e}")
+    # Read exact per-class metrics from ensemble_full_metrics.json if available
+    for out_dir in output_dirs:
+        for sub in ["oof", "val", ""]:
+            full_json_path = os.path.join(out_dir, sub, "ensemble_full_metrics.json")
+            if os.path.exists(full_json_path):
+                try:
+                    with open(full_json_path, "r", encoding="utf-8") as f:
+                        full_json = json.load(f)
+                        for ens_name in analytics_data["ensemble_models"]:
+                            if ens_name in full_json:
+                                per_cls_raw = full_json[ens_name].get("per_class", {})
+                                per_cls_dict = {}
+                                for c_name, c_metrics in per_cls_raw.items():
+                                    per_cls_dict[c_name] = {
+                                        "precision": round(c_metrics.get("precision", 0) * 100, 2),
+                                        "recall": round(c_metrics.get("recall", 0) * 100, 2),
+                                        "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
+                                    }
+                                analytics_data["ensemble_models"][ens_name]["per_class"] = per_cls_dict
+                        if any(v.get("per_class") for v in analytics_data["ensemble_models"].values()):
+                            break
+                except Exception as e:
+                    print(f"Error reading ensemble_full_metrics.json: {e}")
+        if any(v.get("per_class") for v in analytics_data["ensemble_models"].values()):
+            break
 
     return analytics_data
 

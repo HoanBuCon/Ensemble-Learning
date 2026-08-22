@@ -156,6 +156,11 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
     Returns:
         DataFrame with the comparison table.
     """
+    config_paths = [p for p in config_paths if os.path.basename(p) != "dataset.yaml"]
+    if not config_paths:
+        print("No valid model config files provided.")
+        return pd.DataFrame()
+
     results_list: List[Dict[str, Any]] = []
 
     statuses = [inspect_model_status(p) for p in config_paths]
@@ -299,9 +304,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.configs:
-        config_paths = args.configs
+        config_paths = [p for p in args.configs if os.path.basename(p) != "dataset.yaml"]
     else:
-        config_paths = sorted(glob.glob("configs/*.yaml"))
+        config_paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
 
     if not config_paths:
         print("No config files found. Provide --configs or add files to configs/")

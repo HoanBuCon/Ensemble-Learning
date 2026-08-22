@@ -126,7 +126,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.configs:
-        for c in args.configs:
+        valid_configs = [c for c in args.configs if os.path.basename(c) != "dataset.yaml"]
+        for c in valid_configs:
             run_kfold_experiment(
                 c,
                 n_splits=args.folds,

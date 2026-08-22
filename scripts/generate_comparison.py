@@ -64,6 +64,8 @@ def generate_base_comparison_report(
     if config_paths:
         model_dirs = []
         for p in config_paths:
+            if os.path.basename(p) == "dataset.yaml":
+                continue
             cfg = load_config(p)
             save_d = cfg.checkpoint.save_dir
             if os.path.isdir(save_d):
@@ -83,11 +85,13 @@ def generate_base_comparison_report(
         model_groups: Dict[str, List[tuple[int, str]]] = {}
         for d in valid_dirs:
             folder_name = os.path.basename(d)
-            if folder_name in ["val", "oof"]:
+            if folder_name in ["val", "oof", "default", "ensemble", "tensorboard"]:
                 continue
             match = re.match(r"^(.*?)(?:_(\d+))?$", folder_name)
             if match:
                 base_name = match.group(1)
+                if base_name in ["val", "oof", "default", "ensemble", "tensorboard"]:
+                    continue
                 version = int(match.group(2)) if match.group(2) else 0
                 if base_name not in model_groups:
                     model_groups[base_name] = []

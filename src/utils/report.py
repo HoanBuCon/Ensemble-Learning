@@ -22,12 +22,15 @@ def count_parameters(model_name: str, num_classes: int = 6) -> int:
     """Count trainable parameters for a registered model."""
     import torch
 
-    model = create_model(model_name, pretrained=False, num_classes=num_classes)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return n_params
+    try:
+        model = create_model(model_name, pretrained=False, num_classes=num_classes)
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return n_params
+    except Exception:
+        return 0
 
 
 def get_model_size_mb(save_dir: str) -> float:

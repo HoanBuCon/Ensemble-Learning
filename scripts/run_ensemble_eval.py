@@ -52,7 +52,7 @@ def get_latest_model_dirs(outputs_dir: str = "outputs") -> List[str]:
     all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
     valid_dirs = [
         d for d in all_dirs
-        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble"] and (
+        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble", "default", "tensorboard"] and (
             os.path.exists(os.path.join(d, "probabilities.npy"))
             or os.path.exists(os.path.join(d, "test_probabilities.npy"))
             or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
@@ -103,6 +103,11 @@ def generate_val_predictions_if_missing(model_dirs: List[str]) -> None:
 
         ckpt_path = os.path.join(m_dir, "best_model.pth")
         if not os.path.exists(ckpt_path):
+            kfold_ckpts = sorted(glob.glob(os.path.join(m_dir, "kfold", "fold_*", "best_model.pth")))
+            if kfold_ckpts:
+                ckpt_path = kfold_ckpts[0]
+
+        if not os.path.exists(ckpt_path):
             print(f"Checkpoint for {m_name} not found at {ckpt_path}. Skipping.")
             continue
 
@@ -112,10 +117,12 @@ def generate_val_predictions_if_missing(model_dirs: List[str]) -> None:
             num_classes=cfg.model.num_classes,
         )
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
+        state_dict = ckpt.get("model_state_dict", ckpt)
+        model.load_state_dict(state_dict)
 
+        cfg.data.num_workers = 0
         _, val_loader, _, _ = create_dataloaders(cfg)
-        val_probs, val_labels = run_inference(model, val_loader, device=device)
+        _, val_probs, _, val_labels, _ = run_inference(model, val_loader, device=device)
 
         np.save(val_prob_path, val_probs)
         np.save(val_label_path, val_labels)

@@ -73,10 +73,13 @@ def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
 
 
 def resolve_config_paths(configs: Optional[List[str]]) -> List[str]:
-    """Resolve list of YAML config files or default to all configs/*.yaml."""
-    paths = configs if configs else sorted(glob.glob("configs/*.yaml"))
+    """Resolve list of YAML config files or default to all model configs (excluding dataset.yaml)."""
+    if configs:
+        paths = [p for p in configs if os.path.basename(p) != "dataset.yaml"]
+    else:
+        paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
     if not paths:
-        print("Error: No YAML config files found in configs/ directory.")
+        print("Error: No YAML model config files found in configs/ directory.")
         sys.exit(1)
     return paths
 
@@ -281,7 +284,7 @@ def prompt_base_models_training(outputs_dir: str = "outputs") -> str:
         Training mode string: 'auto' (use existing outputs/skip) or 'scratch' (re-train from scratch).
     """
     from scripts.run_experiments import inspect_model_status
-    config_paths = sorted(glob.glob("configs/*.yaml"))
+    config_paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
     if not config_paths:
         return "auto"
 
