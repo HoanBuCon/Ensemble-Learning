@@ -459,7 +459,27 @@ def run_interactive_cli_menu() -> None:
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 7:
+                print("\n" + "=" * 80)
+                print("       RE-GENERATE COMPARISON TABLES & BENCHMARK REPORTS")
+                print("=" * 80)
+                # 1. Base Model Comparison Table & Charts (supports both standard and kfold)
                 generate_base_comparison_report(outputs_dir="outputs", config_paths=None)
+
+                # 2. Check and regenerate Ensemble reports for 'oof' and/or 'val'
+                for ens_mode in ["oof", "val"]:
+                    if os.path.exists(os.path.join("outputs", ens_mode)):
+                        try:
+                            print(f"\n--> Re-generating Ensemble Benchmark Report (Mode: {ens_mode.upper()})...")
+                            run_ensemble_evaluation(mode=ens_mode, outputs_dir="outputs")
+                        except Exception as e:
+                            print(f"  Warning: Ensemble eval ({ens_mode}) failed: {e}")
+
+                # 3. Refresh full diagnostic plot suite
+                try:
+                    generate_all_plots(outputs_dir="outputs")
+                except Exception as e:
+                    print(f"  Warning: generate_all_plots failed: {e}")
+
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 8:

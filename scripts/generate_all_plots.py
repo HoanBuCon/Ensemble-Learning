@@ -207,7 +207,7 @@ def generate_ensemble_plots(
     # 1. Base test probabilities & labels
     model_dirs = sorted([
         d for d in glob.glob(os.path.join(outputs_dir, "*"))
-        if os.path.isdir(d) and os.path.basename(d) not in ["val", "oof", "reports"]
+        if os.path.isdir(d) and os.path.basename(d) not in ["val", "oof", "reports", "default", "ensemble", "tensorboard"]
     ])
     base_models = [os.path.basename(d) for d in model_dirs]
 
@@ -218,8 +218,13 @@ def generate_ensemble_plots(
         m_dir = os.path.join(outputs_dir, m)
         p_file = os.path.join(m_dir, "test_probabilities.npy")
         if not os.path.exists(p_file):
+            p_file = os.path.join(m_dir, "kfold", "test_probabilities.npy")
+        if not os.path.exists(p_file):
             p_file = os.path.join(m_dir, "probabilities.npy")
+
         l_file = os.path.join(m_dir, "test_labels.npy")
+        if not os.path.exists(l_file):
+            l_file = os.path.join(m_dir, "kfold", "test_labels.npy")
         if not os.path.exists(l_file):
             l_file = os.path.join(m_dir, "labels.npy")
 
@@ -237,12 +242,21 @@ def generate_ensemble_plots(
         # Soft Voting Probs
         ensemble_probs_map["Soft Voting Ensemble"] = np.mean(ordered_probs, axis=0)
 
-        # Weighted Voting Probs (re-fit on val)
+        # Weighted Voting & Stacking Meta-Train Probs
         val_probs_list = []
         val_labels = None
         for m in base_models:
-            v_p = os.path.join(outputs_dir, m, "val_probabilities.npy")
-            v_l = os.path.join(outputs_dir, m, "val_labels.npy")
+            if mode == "oof":
+                v_p = os.path.join(outputs_dir, m, "kfold", "oof_probabilities.npy")
+                if not os.path.exists(v_p):
+                    v_p = os.path.join(outputs_dir, m, "oof_probabilities.npy")
+                v_l = os.path.join(outputs_dir, m, "kfold", "oof_labels.npy")
+                if not os.path.exists(v_l):
+                    v_l = os.path.join(outputs_dir, m, "oof_labels.npy")
+            else:
+                v_p = os.path.join(outputs_dir, m, "val_probabilities.npy")
+                v_l = os.path.join(outputs_dir, m, "val_labels.npy")
+
             if os.path.exists(v_p) and os.path.exists(v_l):
                 val_probs_list.append(np.load(v_p))
                 if val_labels is None:
@@ -289,7 +303,7 @@ def generate_ensemble_plots(
                 except Exception as e:
                     print(f"    Warning: Stacking {meta} prob estimation failed: {e}")
 
-    # Generate per-ensemble method charts (Confusion Matrices, Per-Class Bar, ROC/PR)
+    # Generate per-ensemble method charts (Confusion Matrices, Per-Class Bar, ROC/PR, MD reports)
     plots_subfolder = os.path.join(mode_dir, "method_breakdowns")
     os.makedirs(plots_subfolder, exist_ok=True)
 
@@ -329,6 +343,27 @@ def generate_ensemble_plots(
                 per_cls, class_names, m_dir,
                 model_name=method_name, filename="per_class_metrics.png",
             )
+
+            # Write individual method markdown report
+            report_md_path = os.path.join(m_dir, "classification_report.md")
+            rows = []
+            for c_name, c_data in per_cls.items():
+                rows.append({
+                    "Disease_Class": c_name,
+                    "Precision": f"{c_data.get('precision', 0.0) * 100:.2f}%",
+                    "Recall": f"{c_data.get('recall', 0.0) * 100:.2f}%",
+                    "F1_Score": f"{c_data.get('f1_score', 0.0) * 100:.2f}%",
+                    "Support": c_data.get('support', 0),
+                })
+            df_m = pd.DataFrame(rows)
+            with open(report_md_path, "w", encoding="utf-8") as f:
+                f.write(f"# Detailed Classification Report — {method_name} (Mode: {mode.upper()})\n\n")
+                f.write(f"- **Overall Accuracy**: {metrics.get('accuracy', 0.0) * 100:.2f}%\n")
+                f.write(f"- **Macro Precision**: {metrics.get('precision', 0.0) * 100:.2f}%\n")
+                f.write(f"- **Macro Recall**: {metrics.get('recall', 0.0) * 100:.2f}%\n")
+                f.write(f"- **Macro F1-Score**: {metrics.get('f1_score', 0.0) * 100:.2f}%\n\n")
+                f.write("### Per-Class Disease Breakdown\n\n")
+                f.write(df_m.to_markdown(index=False))
 
         if method_name in ensemble_probs_map and test_labels is not None:
             plot_roc_curves(

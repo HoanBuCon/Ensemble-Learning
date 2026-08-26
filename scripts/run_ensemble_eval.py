@@ -406,7 +406,12 @@ def run_ensemble_evaluation(
     print(f"   - Per-Class Report Markdown: {per_class_md_path}")
     print(f"   - Full JSON Dump: {full_json_path}\n")
 
-    return df_results
+    # Automatically generate full visual diagnostic charts and per-method breakdowns
+    try:
+        from scripts.generate_all_plots import generate_ensemble_plots
+        generate_ensemble_plots(outputs_dir=outputs_dir, mode=mode, class_names=class_names)
+    except Exception as e:
+        print(f"  Warning: Could not auto-generate ensemble plots: {e}")
 
     return df_results
 

@@ -71,15 +71,31 @@ def generate_base_comparison_report(
             if os.path.isdir(save_d):
                 model_dirs.append(save_d)
     else:
-        all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
-        valid_dirs = [
-            d for d in all_dirs
-            if os.path.isdir(d) and (
-                os.path.exists(os.path.join(d, "metrics.json")) or
-                os.path.exists(os.path.join(d, "probabilities.npy")) or
-                os.path.exists(os.path.join(d, "test_probabilities.npy"))
-            )
-        ]
+        # Check target outputs_dir, and fallback to OOF_Results / Default_Results if empty
+        search_dirs = [outputs_dir, "OOF_Results/outputs", "Default_Results/outputs", "Default_Result_V2/outputs"]
+        valid_dirs = []
+        resolved_out_dir = outputs_dir
+
+        for s_dir in search_dirs:
+            if not os.path.exists(s_dir):
+                continue
+            all_dirs = sorted(glob.glob(os.path.join(s_dir, "*")))
+            candidate_dirs = [
+                d for d in all_dirs
+                if os.path.isdir(d) and (
+                    os.path.exists(os.path.join(d, "metrics.json")) or
+                    os.path.exists(os.path.join(d, "probabilities.npy")) or
+                    os.path.exists(os.path.join(d, "test_probabilities.npy")) or
+                    os.path.exists(os.path.join(d, "kfold", "oof_metrics.json")) or
+                    os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy")) or
+                    os.path.exists(os.path.join(d, "kfold", "test_probabilities.npy")) or
+                    os.path.exists(os.path.join(d, "kfold", "kfold_summary.csv"))
+                )
+            ]
+            if candidate_dirs:
+                valid_dirs = candidate_dirs
+                resolved_out_dir = s_dir
+                break
 
         # Group by base model name to select latest version if versioned
         model_groups: Dict[str, List[tuple[int, str]]] = {}
@@ -113,6 +129,11 @@ def generate_base_comparison_report(
         base_name = re.sub(r"_\d+$", "", m_name)
 
         metrics_path = os.path.join(m_dir, "metrics.json")
+        if not os.path.exists(metrics_path):
+            metrics_path = os.path.join(m_dir, "kfold", "oof_metrics.json")
+        if not os.path.exists(metrics_path):
+            metrics_path = os.path.join(m_dir, "kfold", "fold_1", "metrics.json")
+
         eval_metrics: Dict[str, Any] = {}
         if os.path.exists(metrics_path):
             try:
@@ -120,6 +141,34 @@ def generate_base_comparison_report(
                     eval_metrics = json.load(f)
             except Exception:
                 pass
+
+        # If test metrics missing, compute from test_probabilities.npy
+        if "accuracy" not in eval_metrics or eval_metrics.get("accuracy", 0.0) == 0.0:
+            test_prob_path = os.path.join(m_dir, "test_probabilities.npy")
+            if not os.path.exists(test_prob_path):
+                test_prob_path = os.path.join(m_dir, "kfold", "test_probabilities.npy")
+            test_lbl_path = os.path.join(m_dir, "test_labels.npy")
+            if not os.path.exists(test_lbl_path):
+                test_lbl_path = os.path.join(m_dir, "kfold", "test_labels.npy")
+            
+            if os.path.exists(test_prob_path):
+                try:
+                    t_probs = np.load(test_prob_path)
+                    t_preds = np.argmax(t_probs, axis=1)
+                    if os.path.exists(test_lbl_path):
+                        t_labels = np.load(test_lbl_path)
+                    else:
+                        from src.utils.config import load_dataset_config
+                        from src.datasets.dataset import ImageFolderDataset
+                        ds_raw = load_dataset_config()
+                        t_dir = ds_raw.get("test_dir", "./data/test")
+                        t_ds = ImageFolderDataset(root=t_dir)
+                        t_labels = np.array([s[1] for s in t_ds.samples])
+                    
+                    comp_m = compute_metrics(t_labels, t_preds)
+                    eval_metrics.update(comp_m)
+                except Exception:
+                    pass
 
         n_params = count_parameters(base_name)
         val_metrics = extract_model_val_metrics(m_dir)
@@ -177,6 +226,11 @@ def generate_base_comparison_report(
         for m_dir in model_dirs:
             base_name = re.sub(r"_\d+$", "", os.path.basename(m_dir))
             m_path = os.path.join(m_dir, "metrics.json")
+            if not os.path.exists(m_path):
+                m_path = os.path.join(m_dir, "kfold", "oof_metrics.json")
+            if not os.path.exists(m_path):
+                m_path = os.path.join(m_dir, "kfold", "fold_1", "metrics.json")
+
             if os.path.exists(m_path):
                 with open(m_path, "r", encoding="utf-8") as f:
                     d = json.load(f)
