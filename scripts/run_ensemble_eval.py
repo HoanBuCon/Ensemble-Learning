@@ -49,10 +49,44 @@ from src.utils.metrics import compute_metrics
 
 def get_latest_model_dirs(outputs_dir: str = "outputs") -> List[str]:
     """Find latest directory for each base model in outputs_dir (supports standard and kfold)."""
-    all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
+    search_dirs = [outputs_dir]
+    if os.path.isdir(outputs_dir):
+        primary_valid = [
+            d for d in glob.glob(os.path.join(outputs_dir, "*"))
+            if os.path.isdir(d) and (
+                os.path.exists(os.path.join(d, "probabilities.npy"))
+                or os.path.exists(os.path.join(d, "test_probabilities.npy"))
+                or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
+                or os.path.exists(os.path.join(d, "kfold", "test_probabilities.npy"))
+            )
+        ]
+        if not primary_valid:
+            search_dirs.extend([
+                "RESULTS/DEFAULT_TRAINING/outputs",
+                "RESULTS/OOF_TRAINING/outputs",
+                "RESULTS/DEFAULT_TRAINING",
+                "RESULTS/OOF_TRAINING",
+                "Default_Result_V2/outputs",
+                "OOF_Results/outputs",
+            ])
+    else:
+        search_dirs.extend([
+            "RESULTS/DEFAULT_TRAINING/outputs",
+            "RESULTS/OOF_TRAINING/outputs",
+            "RESULTS/DEFAULT_TRAINING",
+            "RESULTS/OOF_TRAINING",
+            "Default_Result_V2/outputs",
+            "OOF_Results/outputs",
+        ])
+
+    all_dirs = []
+    for s in search_dirs:
+        if os.path.isdir(s):
+            all_dirs.extend(sorted(glob.glob(os.path.join(s, "*"))))
+
     valid_dirs = [
         d for d in all_dirs
-        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble", "default", "tensorboard"] and (
+        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble", "default", "tensorboard", "verification"] and (
             os.path.exists(os.path.join(d, "probabilities.npy"))
             or os.path.exists(os.path.join(d, "test_probabilities.npy"))
             or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
@@ -131,23 +165,27 @@ def generate_val_predictions_if_missing(model_dirs: List[str]) -> None:
 
 def run_ensemble_evaluation(
     mode: str = "val",
-    outputs_dir: str = "outputs",
+    outputs_dir: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Run ensemble evaluation pipeline.
+    Run full ensemble evaluation pipeline.
 
-    Args:
-        mode: Protocol mode ('val' or 'oof').
-        outputs_dir: Base output directory.
-
-    Returns:
-        DataFrame summarizing ensemble metrics.
+    Supports:
+        - mode='val': Single-Split Fast Mode (Meta-Learners fit on validation split)
+        - mode='oof': 5-Fold Cross-Validation Mode (Meta-Learners fit on 5-Fold OOF predictions)
     """
     mode = mode.lower()
     if mode not in ["val", "oof"]:
         raise ValueError(f"Invalid mode '{mode}'. Expected 'val' or 'oof'.")
 
-    print(f"\n>>> SELECTED MODE: {mode.upper()} <<<\n")
+    # Route outputs_dir based on mode if default or unspecified
+    if outputs_dir is None or outputs_dir in ["outputs", "./outputs"]:
+        if mode == "oof":
+            outputs_dir = "RESULTS/OOF_TRAINING/outputs"
+        else:
+            outputs_dir = "RESULTS/DEFAULT_TRAINING/outputs"
+
+    print(f"\n>>> SELECTED MODE: {mode.upper()} (Target outputs directory: {outputs_dir}) <<<\n")
 
     model_dirs = get_latest_model_dirs(outputs_dir)
     if not model_dirs:

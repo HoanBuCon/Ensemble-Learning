@@ -47,6 +47,19 @@ plt.rcParams.update({
 })
 
 # Curated categorical color palette (Colorblind-friendly)
+
+def save_figure(fig: plt.Figure, filepath: str, **kwargs) -> None:
+    """
+    Save figure in vector SVG format (for publication) as well as PNG (for preview).
+    """
+    base, _ = os.path.splitext(filepath)
+    svg_path = f"{base}.svg"
+    png_path = f"{base}.png"
+    # 1. Vector SVG format
+    fig.savefig(svg_path, format="svg", bbox_inches="tight", **kwargs)
+    # 2. Raster PNG format (300 DPI)
+    fig.savefig(png_path, format="png", dpi=300, bbox_inches="tight", **kwargs)
+
 DISTINCT_COLORS = [
     "#2E86AB",  # Blue
     "#F24236",  # Red
@@ -99,7 +112,7 @@ def plot_training_curves(
     ax.set_title(f"{prefix}Training & Validation Loss")
     ax.legend(frameon=True, fancybox=True, shadow=True, loc="upper right")
     ax.grid(True, alpha=0.35, linestyle="--")
-    fig.savefig(os.path.join(output_dir, "loss_curve.png"))
+    save_figure(fig, os.path.join(output_dir, "loss_curve.png"))
     plt.close(fig)
 
     # --- 2. Accuracy Curve ---
@@ -114,7 +127,7 @@ def plot_training_curves(
     ax.set_title(f"{prefix}Training & Validation Accuracy")
     ax.legend(frameon=True, fancybox=True, shadow=True, loc="lower right")
     ax.grid(True, alpha=0.35, linestyle="--")
-    fig.savefig(os.path.join(output_dir, "accuracy_curve.png"))
+    save_figure(fig, os.path.join(output_dir, "accuracy_curve.png"))
     plt.close(fig)
 
     # --- 3. Learning Rate Curve (if available) ---
@@ -126,7 +139,7 @@ def plot_training_curves(
         ax.set_title(f"{prefix}Learning Rate Schedule")
         ax.set_yscale("log")
         ax.grid(True, alpha=0.35, linestyle="--")
-        fig.savefig(os.path.join(output_dir, "learning_rate_curve.png"))
+        save_figure(fig, os.path.join(output_dir, "learning_rate_curve.png"))
         plt.close(fig)
 
     # --- 4. Unified Multi-Panel Training Dashboard ---
@@ -214,7 +227,7 @@ def plot_training_dashboard(
         ax4.text(0.5, 0.5, "Learning Rate log not available", ha="center", va="center")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig.savefig(os.path.join(output_dir, "training_dashboard.png"))
+    save_figure(fig, os.path.join(output_dir, "training_dashboard.png"))
     plt.close(fig)
 
 
@@ -276,7 +289,7 @@ def plot_confusion_matrix(
     plt.xticks(rotation=35, ha="right")
     plt.yticks(rotation=0)
 
-    fig.savefig(os.path.join(output_dir, fname))
+    save_figure(fig, os.path.join(output_dir, fname))
     plt.close(fig)
 
 
@@ -356,7 +369,7 @@ def plot_ensemble_confusion_matrix_grid(
         fontsize=15, fontweight="bold", y=0.98
     )
     plt.tight_layout(rect=[0, 0.02, 1, 0.96])
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -439,7 +452,7 @@ def plot_per_class_metrics(
     ax.legend(frameon=True, fancybox=True, shadow=True, loc="lower right")
     ax.grid(axis="y", alpha=0.3, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -522,7 +535,7 @@ def plot_roc_curves(
     ax.legend(loc="lower right", frameon=True, fancybox=True, shadow=True, fontsize=9.5)
     ax.grid(True, alpha=0.35, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -594,7 +607,7 @@ def plot_precision_recall_curves(
     ax.legend(loc="lower left", frameon=True, fancybox=True, shadow=True, fontsize=9.5)
     ax.grid(True, alpha=0.35, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -663,7 +676,7 @@ def plot_comparison_bar(
     ]
     ax.legend(handles=legend_elements, loc="lower right", frameon=True)
 
-    fig.savefig(os.path.join(output_dir, fname))
+    save_figure(fig, os.path.join(output_dir, fname))
     plt.close(fig)
 
 
@@ -718,7 +731,7 @@ def plot_per_class_comparison_heatmap(
     plt.xticks(rotation=25, ha="right")
     plt.yticks(rotation=0)
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -769,7 +782,7 @@ def plot_per_class_comparison_bar(
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=9.5)
     ax.grid(axis="y", alpha=0.35, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -858,7 +871,7 @@ def plot_radar_chart_comparison(
         title_fontsize=10.5,
     )
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -969,7 +982,7 @@ def plot_model_tradeoffs(
     ]
     ax.legend(handles=legend_elements, loc="lower right", frameon=True, fontsize=9.5)
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -1012,7 +1025,7 @@ def plot_ensemble_weights(
     ax.grid(axis="y", alpha=0.35, linestyle="--")
     plt.xticks(rotation=15, ha="right")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -1045,7 +1058,7 @@ def plot_stacking_feature_importance(
     ax.set_title(f"Stacking Meta-Learner Feature Importance ({meta_name})", fontsize=13)
     ax.grid(axis="x", alpha=0.35, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)
 
 
@@ -1101,5 +1114,5 @@ def plot_kfold_summary(
     ax.set_ylim(max(70, min(means) - 10), 105)
     ax.grid(axis="y", alpha=0.35, linestyle="--")
 
-    fig.savefig(os.path.join(output_dir, filename))
+    save_figure(fig, os.path.join(output_dir, filename))
     plt.close(fig)

@@ -506,36 +506,47 @@ def generate_ensemble_plots(
     print(f"--> All Ensemble visualizations successfully generated in '{mode_dir}' and '{plots_subfolder}'\n")
 
 
-def generate_all_plots(outputs_dir: str = "outputs") -> None:
+def generate_all_plots(outputs_dir: Optional[str] = None) -> None:
     """Master routine to generate all plots across base models and ensembles."""
     class_names = get_dataset_class_names()
 
-    # Discover base model directories (supports both root model dirs and kfold dirs)
-    all_dirs = sorted(glob.glob(os.path.join(outputs_dir, "*")))
-    model_dirs = []
-    for d in all_dirs:
-        if not os.path.isdir(d) or os.path.basename(d) in ["val", "oof", "reports"]:
-            continue
-        if os.path.exists(os.path.join(d, "metrics.json")) or os.path.exists(os.path.join(d, "history.csv")):
-            model_dirs.append(d)
-        elif os.path.exists(os.path.join(d, "kfold")):
-            model_dirs.append(os.path.join(d, "kfold"))
+    target_dirs = []
+    if outputs_dir and outputs_dir not in ["outputs", "./outputs", "all"]:
+        target_dirs = [outputs_dir]
+    else:
+        for cand in ["RESULTS/DEFAULT_TRAINING/outputs", "RESULTS/OOF_TRAINING/outputs", "outputs"]:
+            if os.path.isdir(cand) and cand not in target_dirs:
+                target_dirs.append(cand)
 
-    print(f"\n{'='*75}")
-    print(f"  RUNNING MASTER VISUALIZATION GENERATOR (Found {len(model_dirs)} Base Models)")
-    print(f"{'='*75}\n")
+    for out_d in target_dirs:
+        all_dirs = sorted(glob.glob(os.path.join(out_d, "*")))
+        model_dirs = []
+        for d in all_dirs:
+            if not os.path.isdir(d) or os.path.basename(d) in ["val", "oof", "reports", "verification"]:
+                continue
+            if os.path.exists(os.path.join(d, "metrics.json")) or os.path.exists(os.path.join(d, "history.csv")):
+                model_dirs.append(d)
+            elif os.path.exists(os.path.join(d, "kfold")):
+                model_dirs.append(os.path.join(d, "kfold"))
 
-    for m_dir in model_dirs:
-        generate_base_model_plots(m_dir, class_names)
+        print(f"\n{'='*75}")
+        print(f"  RUNNING MASTER VISUALIZATION GENERATOR FOR: {out_d} (Found {len(model_dirs)} Base Models)")
+        print(f"{'='*75}\n")
 
-    # Generate ensemble plots for both 'val' and 'oof' modes if they exist
-    for mode in ["val", "oof"]:
-        if os.path.exists(os.path.join(outputs_dir, mode)):
-            generate_ensemble_plots(outputs_dir, mode=mode, class_names=class_names)
+        for m_dir in model_dirs:
+            generate_base_model_plots(m_dir, class_names)
 
-    # Generate base comparison plots in root outputs/
-    from scripts.generate_comparison import generate_base_comparison_report
-    generate_base_comparison_report(outputs_dir=outputs_dir)
+        # Generate ensemble plots for both 'val' and 'oof' modes if they exist
+        for mode in ["val", "oof"]:
+            if os.path.exists(os.path.join(out_d, mode)):
+                generate_ensemble_plots(out_d, mode=mode, class_names=class_names)
+
+        # Generate base comparison plots in out_d
+        try:
+            from scripts.generate_comparison import generate_base_comparison_report
+            generate_base_comparison_report(outputs_dir=out_d)
+        except Exception as e:
+            print(f"  Warning: Base comparison report in {out_d} skipped: {e}")
 
     print(f"\n{'='*75}")
     print(f"  ALL PLOTS AND DIAGNOSTIC REPORTS COMPLETED SUCCESSFULLY!")
@@ -546,8 +557,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate comprehensive visualization suite")
     parser.add_argument(
         "--outputs-dir",
-        default="outputs",
-        help="Main outputs directory (default: 'outputs')",
+        default=None,
+        help="Main outputs directory (default: scan both RESULTS/DEFAULT_TRAINING and RESULTS/OOF_TRAINING)",
     )
     args = parser.parse_args()
 

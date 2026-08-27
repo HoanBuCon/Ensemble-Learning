@@ -26,12 +26,20 @@ Enterprise-grade PyTorch research framework designed for image classification, E
   - Soft Voting (Probability Averaging)
   - Weighted Voting (Automated grid-search weight optimization)
   - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) with Out-of-Fold (OOF) prediction generation to eliminate data leakage.
+- **Scientific Verification & Calibration Suite (`scripts/verification/` & `python main.py verify`)**:
+  - Probability Calibration: Expected Calibration Error (ECE, 15 bins), Multi-class Brier Score, and Negative Log-Likelihood (NLL).
+  - Model Diversity & Continuous Probability Vector Ambiguity ($\bar{A}_{\text{prob}}$) as per Krogh & Vedelsby (1995).
+  - Cross-Protocol Paired Hypothesis Testing Matrix: Exhaustive McNemar paired tests for all 6 Ensemble methods comparing Single-Split vs. 5-Fold OOF with Edwards' Chi-Square, Exact Two-Sided Binomial $p$-values, Bonferroni multiple testing correction ($\alpha = 0.0083$), Risk Difference ($95\%$ CI), Cohen's $h$ effect sizes, and statistical power.
+  - Hardware Efficiency & Inference Latency Benchmark (GPU/CPU Latency, FPS, Model Memory & Params).
+  - Latent Feature Space t-SNE 2D Manifold Quality (Silhouette Score, Davies-Bouldin Index, Calinski-Harabasz).
+  - Automated report generation exporting comprehensive CSV, JSON, and Markdown summary files (`FULL_SCIENTIFIC_VERIFICATION_REPORT.md`).
 - **FastAPI Web Server & REST API (`server.py`)**: High-performance backend inference server with batch processing, dynamic `dataset_info` serving, and lazy model weight caching.
 - **Interactive Web Dashboard Analytics**:
-  - `Base Models (4)` Tab & `Ensemble Methods (6)` Tab.
-  - Per-Class Disease Breakdown Charts for both Base Models and Ensemble Methods with interactive metric pills (`F1-Score`, `Precision`, `Recall`).
-  - Active glowing state UI/UX for Analytics toggle button.
-- **Unified Interactive Master CLI (`main.py`)**: Terminal controller with Angular CLI-style menu (`↑/↓` arrow key & number key navigation) or direct subcommand flags (`all-in-one`, `train`, `ensemble`, `serve`, `report`).
+  - Dual-Protocol Switcher (`5-Fold OOF Mode` vs. `Single-Split Mode`) dynamically refreshing all charts, tables, and verification metrics.
+  - Tab 1: `Base Models (4)` & Tab 2: `Ensemble Methods (6)` with Per-Class Disease Breakdown Charts and interactive metric pills (`F1-Score`, `Precision`, `Recall`).
+  - Tab 3: `Scientific Verification & Calibration` with interactive 2x2 Contingency Matrix, Cross-Protocol Hypothesis Testing Matrix, Reliability diagrams, and Ambiguity decomposition.
+  - Explainable AI: Multi-model Grad-CAM visual attention heatmaps.
+- **Unified Interactive Master CLI (`main.py`)**: Terminal controller with Angular CLI-style menu (`↑/↓` arrow key & number key navigation) or direct subcommand flags (`all-in-one`, `train`, `ensemble`, `serve`, `verify`, `report`).
 
 ### Project Structure
 
@@ -40,7 +48,7 @@ pipeline/
 ├── main.py                   # Master CLI controller (Interactive menu & subcommands)
 ├── server.py                 # FastAPI REST API & Inference Server
 ├── web/                      # Clean Decoupled Frontend Web Assets
-│   ├── index.html            # Dashboard HTML structure
+│   ├── index.html            # Dashboard HTML structure & Analytics tabs
 │   ├── styles.css            # Dark mode glassmorphism stylesheet & active button glow
 │   └── app.js                # Frontend JS logic (Upload, Ctrl+V Paste, Charts, API Fetch)
 ├── configs/                  # YAML configuration files
@@ -54,7 +62,24 @@ pipeline/
 │   ├── evaluate.py           # Standalone evaluation script
 │   ├── run_experiments.py   # Multi-model benchmark runner
 │   ├── run_ensemble_eval.py  # Ensemble evaluation pipeline
-│   └── generate_comparison.py# Comparison report & plot generator
+│   ├── run_kfold.py          # 5-Fold Cross Validation runner
+│   ├── generate_comparison.py# Comparison report & plot generator
+│   └── verification/         # Scientific Verification & Calibration Suite
+│       ├── __init__.py
+│       ├── common_utils.py             # Dynamic auto-discovery & directory resolver
+│       ├── verify_all_metrics.py       # Master automated verification suite
+│       ├── eval_calibration.py         # Probability calibration (ECE, Brier, NLL)
+│       ├── eval_diversity_ambiguity.py # Ambiguity decomposition & Yule's Q
+│       ├── eval_mcnemar_test.py        # Cross-protocol McNemar hypothesis testing matrix
+│       ├── eval_advanced_metrics.py    # ROC-AUC, MCC, Cohen's Kappa, Weighted F1
+│       ├── eval_latency_throughput.py  # GPU/CPU latency & FPS benchmark
+│       └── eval_tsne.py                # 2D t-SNE latent feature space clustering
+├── outputs/                  # Hierarchical output directory (Zero-collision)
+│   ├── <model_name>/         # Single-Split parent directory
+│   │   └── kfold/            # 5-Fold OOF child directory
+│   ├── val/                  # Single-Split Ensemble results
+│   ├── oof/                  # 5-Fold OOF Ensemble results
+│   └── verification/         # Verification audit reports (Master report & CSV/JSON matrices)
 ├── src/
 │   ├── datasets/             # Dataset loaders & Albumentations transforms
 │   ├── models/               # ModelFactory with backbone registrations
@@ -148,7 +173,20 @@ python main.py ensemble                          # Interactive prompt for val vs
 python main.py ensemble --mode val               # Fast Validation Mode (~30s)
 python main.py ensemble --mode oof               # Full 5-Fold OOF Mode (~10-13 hrs)
 
-# 6. Re-generate Comparison Tables & Plots Only
+# 6. 5-Fold Cross-Validation Across All Backbones
+python main.py kfold-all
+
+# 7. Scientific Verification & Calibration Suite
+python main.py verify                            # Run complete verification suite (auto-discovers folders)
+python main.py verify --task calibration         # ECE, Brier Score, NLL
+python main.py verify --task diversity           # Disagreement Rate, Yule's Q, Ambiguity Decomposition
+python main.py verify --task mcnemar             # Cross-Protocol McNemar Hypothesis Testing Matrix & Effect Size
+python main.py verify --task advanced            # Macro ROC-AUC, MCC, Cohen's Kappa, Weighted F1
+python main.py verify --task latency             # GPU/CPU Latency & Throughput (FPS)
+python main.py verify --task tsne                # 2D t-SNE Latent Feature Space Clustering
+python main.py verify --save-dir custom_folder/  # Custom export directory
+
+# 8. Re-generate Comparison Tables & Plots Only
 python main.py report
 ```
 
@@ -179,16 +217,24 @@ Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ 
 - **Bộ huấn luyện dùng chung (Generic Trainer)**: Trainer hỗ trợ Tự động ép kiểu hỗn hợp (AMP), Cắt tầng đạo hàm (Gradient clipping), Tích lũy đạo hàm (Gradient accumulation), Lịch trình học tập có khởi động (Warmup LR), Dừng sớm (Early stopping) và lưu trữ checkpoint.
 - **Quản lý Tập dữ liệu Tập trung (`configs/dataset.yaml`)**: Nguồn sự thật duy nhất (Single Source of Truth) khai báo số lớp, nhãn class, đường dẫn dữ liệu và tên tiếng Việt hiển thị, không hardcode tên class trong code Python.
 - **Tự động nhận diện (Auto-Discovery)**: `src/utils/config.py` tự động đọc `dataset.yaml` hoặc tự quét tên thư mục `data/` và tệp `outputs/**/class_to_idx.json` để tự cấu hình `num_classes` cho tất cả các mô hình.
-- **Bộ điều khiển Master CLI tương tác (`main.py`)**: Hỗ trợ phím mũi tên `↑` / `↓` + `Enter` hoặc gõ số `1`-`7` để chọn tác vụ dạng Angular CLI.
-- **Biểu đồ Phân tích Web Analytics**:
-  - Tích hợp 2 tab phân tích riêng biệt: `Base Models (4)` & `Ensemble Methods (6)`.
-  - Biểu đồ phân rã chỉ số từng loại bệnh lá trà (*F1-Score*, *Precision*, *Recall*) cho cả Mô hình đơn và Phương pháp Ensemble.
-  - Trạng thái Active phát sáng Glow UI/UX cho nút đóng/mở Analytics.
+- **Bộ điều khiển Master CLI tương tác (`main.py`)**: Hỗ trợ phím mũi tên `↑` / `↓` + `Enter` hoặc gõ số `1`-`10` để chọn tác vụ dạng Angular CLI (`all-in-one`, `train`, `ensemble`, `kfold`, `verify`, `serve`, `report`).
+- **Giao diện Web Dashboard & Phân tích Đa Protocol (`server.py` + `web/`)**:
+  - Chuyển đổi linh hoạt giữa `5-Fold OOF Mode` và `Single-Split Mode` với cơ chế làm mới toàn bộ biểu đồ, bảng dữ liệu động.
+  - Tab 1: `Base Models (4)` & Tab 2: `Ensemble Methods (6)` với biểu đồ phân rã chỉ số từng loại bệnh (*F1-Score*, *Precision*, *Recall*).
+  - Tab 3: `Scientific Verification & Calibration` hiển thị Ma trận kiểm định chéo McNemar, bảng Contingency $2 \times 2$, phân rã Ambiguity và biểu đồ Calibration.
+  - Thị giác giải thích Explainable AI: Trực quan hóa bản đồ chú ý nhiệt đa mô hình qua Grad-CAM.
 - **Mô-đun Ensemble độc lập**: Xử lý trực tiếp trên các mảng xác suất NumPy (không phụ thuộc vào PyTorch) bao gồm:
   - Hard Voting (Bầu chọn theo đa số)
   - Soft Voting (Trung bình cộng xác suất)
-  - Weighted Voting (Tối ưu hóa trọng số tự động bằng Grid-search)
-  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) để chống rò rỉ dữ liệu.
+  - Weighted Voting (Tối ưu hóa trọng số tự động bằng SLSQP)
+  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) $7,192 \times 24$ để chống rò rỉ dữ liệu.
+- **Bộ Công cụ Kiểm định Khoa học Toàn diện (`scripts/verification/` & `python main.py verify`)**:
+  - Đo lường Hiệu chuẩn Xác suất: Expected Calibration Error (ECE 15 bins), Brier Score, Negative Log-Likelihood (NLL).
+  - Đo lường Độ đa dạng Mô hình & Phân rã Ambiguity ($\bar{A}_{\text{prob}}$) theo định lý Krogh & Vedelsby (1995).
+  - Ma trận Kiểm định Chéo McNemar Toàn diện: So sánh từng cặp cho toàn bộ 6 phương pháp Ensemble giữa Single-Split và 5-Fold OOF, kèm Risk Difference ($95\%$ CI), Effect Size Cohen's $h$, hiệu chỉnh Bonferroni ($\alpha = 0.0083$) và Statistical Power.
+  - Đánh giá Phân tách Không gian Ẩn t-SNE 2D (Silhouette Score, Davies-Bouldin, Calinski-Harabasz).
+  - Đo đạc Hiệu năng Phần cứng: Độ trễ Latency (ms), Tốc độ Throughput (FPS) trên CPU/GPU, Dung lượng MB và Số lượng Tham số.
+  - Tự động xuất báo cáo tổng hợp Master: `FULL_SCIENTIFIC_VERIFICATION_REPORT.md`.
 - **FastAPI Web Server & REST API (`server.py`)**: Máy chủ inference hiệu năng cao hỗ trợ xử lý batch nhiều ảnh, trả về metadata `dataset_info` và cache trọng số mô hình tối ưu.
 
 ### Cấu trúc thư mục
@@ -198,7 +244,7 @@ pipeline/
 ├── main.py                   # Bộ điều khiển Master CLI (Menu tương tác & các câu lệnh)
 ├── server.py                 # Máy chủ FastAPI REST API & Inference Server
 ├── web/                      # Thư mục Frontend tách biệt độc lập
-│   ├── index.html            # Cấu trúc HTML Dashboard & 2 tab Analytics
+│   ├── index.html            # Cấu trúc HTML Dashboard & 3 tab Analytics & Verification
 │   ├── styles.css            # Tệp CSS Dark Mode Glassmorphism & hiệu ứng Glow Active
 │   └── app.js                # Tệp JavaScript xử lý Upload, Ctrl+V Paste, Charts & Fetch API
 ├── configs/                  # Các tệp cấu hình YAML
@@ -212,7 +258,24 @@ pipeline/
 │   ├── evaluate.py           # Script đánh giá mô hình độc lập
 │   ├── run_experiments.py   # Bộ chạy thử nghiệm tự động nhiều mô hình
 │   ├── run_ensemble_eval.py  # Script đánh giá Ensemble
-│   └── generate_comparison.py# Script xuất báo cáo & vẽ đồ thị so sánh
+│   ├── run_kfold.py          # Bộ chạy kiểm định chéo 5-Fold Cross Validation
+│   ├── generate_comparison.py# Script xuất báo cáo & vẽ đồ thị so sánh
+│   └── verification/         # Bộ Công cụ Kiểm định & Thẩm định Khoa học
+│       ├── __init__.py
+│       ├── common_utils.py             # Tiện ích tự động nhận diện thư mục kết quả
+│       ├── verify_all_metrics.py       # Script kiểm định tự động toàn diện Master
+│       ├── eval_calibration.py         # Kiểm định hiệu chuẩn xác suất (ECE, Brier, NLL)
+│       ├── eval_diversity_ambiguity.py # Phân tích độ đa dạng & phân rã Ambiguity
+│       ├── eval_mcnemar_test.py        # Ma trận kiểm định chéo McNemar & Effect size
+│       ├── eval_advanced_metrics.py    # Đo lường ROC-AUC, MCC, Cohen's Kappa, Weighted F1
+│       ├── eval_latency_throughput.py  # Đo đạc độ trễ & FPS trên GPU/CPU
+│       └── eval_tsne.py                # Phân tích cụm không gian ẩn 2D t-SNE
+├── outputs/                  # Thư mục kết quả mặc định (Phân cấp & Không ghi đè)
+│   ├── <tên_mô_hình>/        # Thư mục Cha: Kết quả Single-Split (best_model.pth)
+│   │   └── kfold/            # Thư mục Con: Kết quả 5-Fold OOF (fold_1..5 checkpoints)
+│   ├── val/                  # Bảng so sánh 6 Ensemble Single-Split
+│   ├── oof/                  # Bảng so sánh 6 Ensemble 5-Fold OOF
+│   └── verification/         # Báo cáo Kiểm định Khoa học xuất ra (Master report & CSV/JSON)
 ├── src/
 │   ├── datasets/             # Tải dữ liệu & biến đổi dữ liệu (Albumentations)
 │   ├── models/               # ModelFactory & Đăng ký mô hình
@@ -306,11 +369,31 @@ python main.py ensemble                          # Chọn mode val/oof qua giao 
 python main.py ensemble --mode val               # Chế độ Validation nhanh (~30s)
 python main.py ensemble --mode oof               # Chế độ Full 5-Fold OOF (~10-13 hrs)
 
-# 6. Tạo lại các bảng báo cáo & vẽ đồ thị so sánh mô hình base
+# 6. Chạy Kiểm định Chéo 5-Fold cho tất cả mô hình
+python main.py kfold-all
+
+# 7. Chạy Bộ Kiểm định Khoa học & Hiệu chuẩn Xác suất
+python main.py verify                            # Chạy toàn bộ bộ kiểm định (tự động nhận diện thư mục)
+python main.py verify --task calibration         # Đo ECE, Brier Score, NLL
+python main.py verify --task diversity           # Đo Tỷ lệ Bất đồng, Yule's Q, Phân rã Ambiguity
+python main.py verify --task mcnemar             # Ma trận kiểm định chéo McNemar & Effect size
+python main.py verify --task advanced            # Đo lường Macro ROC-AUC, MCC, Cohen's Kappa, Weighted F1
+python main.py verify --task latency             # Đo đạc độ trễ Latency & Tốc độ Throughput (FPS)
+python main.py verify --task tsne                # Phân tích cụm không gian ẩn 2D t-SNE
+python main.py verify --save-dir my_reports/     # Xuất báo cáo vào thư mục tùy chọn
+
+# 8. Tạo lại các bảng báo cáo & vẽ đồ thị so sánh mô hình base
 python main.py report
 ```
 
+#### 4. Giao diện Web Dashboard & Các Endpoint REST API
+
+Khi máy chủ đang hoạt động (`python main.py serve`):
+- **Giao diện Web Dashboard Trực quan**: `http://127.0.0.1:8000/` (Kéo thả ảnh, nhấn `Ctrl + V` để dán ảnh chụp màn hình, hoặc nhấn nút Xóa).
+- **Tài liệu Swagger OpenAPI Tương tác**: `http://127.0.0.1:8000/docs`.
+- **API Dự đoán Phân loại Đa ảnh**: `POST /api/v1/predict` (Nhận danh sách `files` và tham số `mode_type`).
+
 ---
 
-## License
-Academic Research & Thesis Use.
+## Giấy phép (License)
+Dành cho Nghiên cứu Học thuật & Khóa luận Tốt nghiệp (Academic Research & Thesis Use).

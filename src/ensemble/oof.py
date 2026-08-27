@@ -87,9 +87,19 @@ class OOFGenerator:
         self.split_seed = split_seed
         self.force_retrain = force_retrain
         self.device = torch.device(config.device)
-        self.output_dir = output_dir or os.path.join(
-            config.checkpoint.save_dir, "kfold"
-        )
+        if output_dir:
+            self.output_dir = output_dir
+        else:
+            base_sd = config.checkpoint.save_dir
+            if "DEFAULT_TRAINING" in base_sd:
+                self.output_dir = os.path.join(base_sd.replace("DEFAULT_TRAINING", "OOF_TRAINING"), "kfold")
+            elif "Default_Result" in base_sd:
+                self.output_dir = os.path.join(base_sd.replace("Default_Result", "OOF_Results"), "kfold")
+            elif base_sd.startswith("./outputs") or base_sd.startswith("outputs"):
+                model_name = getattr(config.model, "name", "model")
+                self.output_dir = os.path.join("RESULTS", "OOF_TRAINING", "outputs", model_name, "kfold")
+            else:
+                self.output_dir = os.path.join(base_sd, "kfold")
 
         os.makedirs(self.output_dir, exist_ok=True)
 

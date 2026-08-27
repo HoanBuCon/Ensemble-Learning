@@ -159,12 +159,46 @@ class CheckpointManager:
             json.dump(metrics, f, indent=2, default=str)
 
     def load_best(self, device: str = "cpu") -> Dict[str, Any]:
-        """Load the best checkpoint."""
-        return self._load(os.path.join(self.save_dir, "best_model.pth"), device)
+        """Load the best checkpoint, falling back to alternate result directories if needed."""
+        primary_path = os.path.join(self.save_dir, "best_model.pth")
+        if os.path.exists(primary_path):
+            return self._load(primary_path, device)
+
+        folder_name = os.path.basename(self.save_dir)
+        fallback_candidates = [
+            os.path.join("RESULTS", "DEFAULT_TRAINING", "outputs", folder_name, "best_model.pth"),
+            os.path.join("RESULTS", "DEFAULT_TRAINING", folder_name, "best_model.pth"),
+            os.path.join("RESULTS", "OOF_TRAINING", "outputs", folder_name, "kfold", "fold_0", "best_model.pth"),
+            os.path.join("RESULTS", "OOF_TRAINING", folder_name, "kfold", "fold_0", "best_model.pth"),
+            os.path.join("outputs", folder_name, "best_model.pth"),
+            os.path.join("Default_Result_V2", "outputs", folder_name, "best_model.pth"),
+            os.path.join("OOF_Results", "outputs", folder_name, "kfold", "fold_0", "best_model.pth"),
+        ]
+        for cand in fallback_candidates:
+            if os.path.exists(cand):
+                return self._load(cand, device)
+
+        return self._load(primary_path, device)
 
     def load_last(self, device: str = "cpu") -> Dict[str, Any]:
-        """Load the last checkpoint."""
-        return self._load(os.path.join(self.save_dir, "last_model.pth"), device)
+        """Load the last checkpoint, falling back to alternate result directories if needed."""
+        primary_path = os.path.join(self.save_dir, "last_model.pth")
+        if os.path.exists(primary_path):
+            return self._load(primary_path, device)
+
+        folder_name = os.path.basename(self.save_dir)
+        fallback_candidates = [
+            os.path.join("RESULTS", "DEFAULT_TRAINING", "outputs", folder_name, "last_model.pth"),
+            os.path.join("RESULTS", "DEFAULT_TRAINING", folder_name, "last_model.pth"),
+            os.path.join("RESULTS", "OOF_TRAINING", "outputs", folder_name, "kfold", "fold_0", "last_model.pth"),
+            os.path.join("RESULTS", "OOF_TRAINING", folder_name, "kfold", "fold_0", "last_model.pth"),
+            os.path.join("outputs", folder_name, "last_model.pth"),
+        ]
+        for cand in fallback_candidates:
+            if os.path.exists(cand):
+                return self._load(cand, device)
+
+        return self._load(primary_path, device)
 
     @staticmethod
     def _load(path: str, device: str = "cpu") -> Dict[str, Any]:

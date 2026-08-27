@@ -33,18 +33,34 @@
                 <div>
                     <h3 style="font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
                         <i class="fa-solid fa-chart-line" style="color: var(--accent-color);"></i>
-                        Model Benchmark Analytics & Comparison Charts
+                        Model Benchmark Analytics & Scientific Verification Suite
                     </h3>
-                    <p style="font-size: 0.82rem; color: var(--text-secondary); font-family: var(--font-tech); margin-top: 0.2rem;">Comprehensive performance metrics & epoch history training curves</p>
+                    <p style="font-size: 0.82rem; color: var(--text-secondary); font-family: var(--font-tech); margin-top: 0.2rem;">
+                        Interactive metrics, probability calibration, diversity decomposition, and hypothesis testing
+                    </p>
                 </div>
                 
                 <div class="analytics-header-actions">
+                    <!-- Protocol Switcher Pills -->
+                    <div class="protocol-switcher" id="protocolSwitcher">
+                        <button type="button" class="protocol-pill active" data-protocol="oof" title="5-Fold Cross Validation (Out-of-Fold Protocol)">
+                            <i class="fa-solid fa-arrows-rotate"></i> 5-Fold OOF Mode
+                        </button>
+                        <button type="button" class="protocol-pill" data-protocol="val" title="Single-Split Holdout Validation Protocol">
+                            <i class="fa-solid fa-bolt"></i> Single-Split Mode
+                        </button>
+                    </div>
+
+                    <!-- 3 Analytics Tab Buttons -->
                     <div class="analytics-tab-buttons" id="analyticsTabGroup">
                         <button type="button" class="analytics-tab-btn active" data-tab="base_models">
                             <i class="fa-solid fa-brain"></i> Base Models (4)
                         </button>
                         <button type="button" class="analytics-tab-btn" data-tab="ensemble_methods">
                             <i class="fa-solid fa-network-wired"></i> Ensemble Methods (6)
+                        </button>
+                        <button type="button" class="analytics-tab-btn" data-tab="verification">
+                            <i class="fa-solid fa-shield-halved"></i> Scientific Verification & Calibration
                         </button>
                     </div>
 
@@ -96,6 +112,33 @@
                             <canvas id="chartPerClass"></canvas>
                         </div>
                     </div>
+
+                    <!-- Table Card: Base Models Exhaustive Metrics Table -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-table-list" style="color: var(--cyan-color);"></i>
+                            Base Models Exhaustive Benchmark Table (Test Set N = 1,546)
+                        </div>
+                        <div class="table-responsive">
+                            <table class="analytics-table" id="baseModelsTable">
+                                <thead>
+                                    <tr>
+                                        <th>Model Backbone</th>
+                                        <th>Accuracy</th>
+                                        <th>Macro F1</th>
+                                        <th>Macro Prec</th>
+                                        <th>Macro Recall</th>
+                                        <th>Weighted F1</th>
+                                        <th>Cohen's Kappa</th>
+                                        <th>ECE (15 bins)</th>
+                                        <th>Brier Score</th>
+                                        <th>NLL</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -116,7 +159,7 @@
                     <!-- Chart Card 2: Accuracy Gain vs Best Base Model -->
                     <div class="chart-card">
                         <div class="chart-card-title">
-                            <i class="fa-solid fa-arrow-up-right-dots" style="color: var(--emerald-color, #10b981);"></i>
+                            <i class="fa-solid fa-arrow-up-right-dots" style="color: var(--success-color);"></i>
                             Accuracy Gain Over Best Single Model (+%)
                         </div>
                         <div class="chart-container">
@@ -142,14 +185,207 @@
                         </div>
                     </div>
 
-                    <!-- Chart Card 4: Base Models vs Ensemble Top Comparison -->
+                    <!-- Table Card: Ensemble Methods Comprehensive Table -->
                     <div class="chart-card chart-card-full">
                         <div class="chart-card-title">
-                            <i class="fa-solid fa-ranking-star" style="color: #f59e0b;"></i>
-                            Best Base Model vs Best Ensemble Method Benchmark Comparison (%)
+                            <i class="fa-solid fa-table-list" style="color: var(--success-color);"></i>
+                            Ensemble Methods Comprehensive Benchmark Table
+                        </div>
+                        <div class="table-responsive">
+                            <table class="analytics-table" id="ensembleModelsTable">
+                                <thead>
+                                    <tr>
+                                        <th>Ensemble Method</th>
+                                        <th>Type</th>
+                                        <th>Accuracy</th>
+                                        <th>Macro F1</th>
+                                        <th>Precision</th>
+                                        <th>Recall</th>
+                                        <th>Gain vs Single</th>
+                                        <th>ECE (15 bins)</th>
+                                        <th>Brier Score</th>
+                                        <th>NLL</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: Scientific Verification & Calibration Suite -->
+            <div id="analyticsTabVerification" style="display: none;">
+                <div class="analytics-grid">
+                    <!-- Top Highlight Cards (4 Key Metrics) -->
+                    <div class="verif-highlight-grid">
+                        <div class="verif-stat-card">
+                            <div class="verif-stat-icon" style="color: var(--success-color);"><i class="fa-solid fa-bullseye"></i></div>
+                            <div class="verif-stat-content">
+                                <div class="verif-stat-title">Best Calibrated (ECE)</div>
+                                <div class="verif-stat-value" id="verifBestEce">0.0079 (< 0.8%)</div>
+                                <div class="verif-stat-desc">Stacking Random Forest (OOF)</div>
+                            </div>
+                        </div>
+
+                        <div class="verif-stat-card">
+                            <div class="verif-stat-icon" style="color: var(--cyan-color);"><i class="fa-solid fa-chart-pie"></i></div>
+                            <div class="verif-stat-content">
+                                <div class="verif-stat-title">Lowest Brier Score</div>
+                                <div class="verif-stat-value" id="verifBestBrier">0.0397</div>
+                                <div class="verif-stat-desc">-41.4% Error vs ResNet-50</div>
+                            </div>
+                        </div>
+
+                        <div class="verif-stat-card">
+                            <div class="verif-stat-icon" style="color: var(--warning-color);"><i class="fa-solid fa-wave-square"></i></div>
+                            <div class="verif-stat-content">
+                                <div class="verif-stat-title">Minimum Log-Loss (NLL)</div>
+                                <div class="verif-stat-value" id="verifBestNll">0.0873</div>
+                                <div class="verif-stat-desc">Stacking XGBoost (OOF)</div>
+                            </div>
+                        </div>
+
+                        <div class="verif-stat-card">
+                            <div class="verif-stat-icon" style="color: var(--pink-color);"><i class="fa-solid fa-dna"></i></div>
+                            <div class="verif-stat-content">
+                                <div class="verif-stat-title">Ambiguity Ratio (A_prob)</div>
+                                <div class="verif-stat-value" id="verifAmbiguityRatio">2.211x</div>
+                                <div class="verif-stat-desc">Single (0.0135) vs OOF (0.0061)</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card: Calibration Comparison (ECE & Brier Score) -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-crosshairs" style="color: var(--success-color);"></i>
+                            Expected Calibration Error (ECE - Lower is Better)
                         </div>
                         <div class="chart-container">
-                            <canvas id="chartBaseVsEnsemble"></canvas>
+                            <canvas id="chartEceBenchmark"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart Card: Scoring Rules (Brier & NLL) -->
+                    <div class="chart-card">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-calculator" style="color: var(--cyan-color);"></i>
+                            Brier Score & NLL (Strict Proper Scoring Rules)
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chartBrierNll"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Section 2: Model Diversity & Ambiguity Decomposition Table -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-diagram-project" style="color: var(--pink-color);"></i>
+                            Pairwise Model Diversity & Ambiguity Decomposition (Single-Split vs. 5-Fold OOF)
+                        </div>
+                        <div class="table-responsive">
+                            <table class="analytics-table" id="diversityTable">
+                                <thead>
+                                    <tr>
+                                        <th>Model Pair</th>
+                                        <th>Disagreement Single (%)</th>
+                                        <th>Disagreement OOF (%)</th>
+                                        <th>Yule's Q Single</th>
+                                        <th>Yule's Q OOF</th>
+                                        <th>Kappa Single</th>
+                                        <th>Kappa OOF</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        <div class="diversity-summary-bar">
+                            <span><i class="fa-solid fa-circle-nodes"></i> <strong>Global Disagreement Rate</strong>: Single-Split = <strong id="globDisSingle">5.89%</strong> | 5-Fold OOF = <strong id="globDisOof">4.20%</strong></span>
+                            <span><i class="fa-solid fa-scale-balanced"></i> <strong>Krogh-Vedelsby Ambiguity (A)</strong>: Single-Split = <strong>0.013494</strong> | 5-Fold OOF = <strong>0.006103</strong> (<strong>2.211x Ratio</strong>)</span>
+                        </div>
+                    </div>
+
+                    <!-- Section 3: McNemar Statistical Hypothesis Testing & 11-Sample Dissection -->
+                    <div class="chart-card chart-card-full">
+                        <div class="chart-card-title">
+                            <i class="fa-solid fa-scale-unbalanced" style="color: var(--warning-color);"></i>
+                            McNemar Paired Hypothesis Test: Single Soft Voting vs. 5-Fold Hard Voting
+                        </div>
+                        
+                        <div class="mcnemar-dashboard-grid">
+                            <!-- 2x2 Contingency Matrix Card -->
+                            <div class="contingency-box">
+                                <div class="contingency-title">2×2 Paired Contingency Matrix (N = 1,546)</div>
+                                <div class="contingency-grid">
+                                    <div class="contingency-cell correct">
+                                        <div class="c-val" id="cntN11">1,505</div>
+                                        <div class="c-lbl">Both Correct (n11)</div>
+                                    </div>
+                                    <div class="contingency-cell single-win">
+                                        <div class="c-val" id="cntN10">7</div>
+                                        <div class="c-lbl">Single Correct, OOF Error (n10)</div>
+                                    </div>
+                                    <div class="contingency-cell oof-win">
+                                        <div class="c-val" id="cntN01">4</div>
+                                        <div class="c-lbl">OOF Correct, Single Error (n01)</div>
+                                    </div>
+                                    <div class="contingency-cell error">
+                                        <div class="c-val" id="cntN00">30</div>
+                                        <div class="c-lbl">Both Error (n00)</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Statistical Test Result Card -->
+                            <div class="test-conclusion-box">
+                                <div class="contingency-title">Statistical Test Metrics & Conclusion</div>
+                                <div class="stat-metric-row">
+                                    <span>McNemar Chi-Square (Edwards' Correction):</span>
+                                    <strong id="mcnChi2">&chi;² = 0.3636</strong>
+                                </div>
+                                <div class="stat-metric-row">
+                                    <span>Exact Two-Sided Binomial Test:</span>
+                                    <strong id="mcnPval">p = 0.5488 (&gg; 0.05)</strong>
+                                </div>
+                                <div class="stat-conclusion-badge pass" id="mcnConclusion">
+                                    <i class="fa-solid fa-circle-check"></i> Fail to reject H0 (p > 0.05). No statistically significant difference in error rates.
+                                </div>
+                                <p class="stat-explanation-text">
+                                    The 3-sample discrepancy (7 vs 4) is fully attributable to test sample variation. Both protocols maintain equivalent classification efficacy while OOF excels in calibration.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Full Cross-Protocol Pairwise McNemar Matrix Table -->
+                        <div style="margin-top: 1.5rem;">
+                            <div class="chart-card-title" style="font-size: 0.95rem;">
+                                <i class="fa-solid fa-table-cells" style="color: var(--primary-color);"></i>
+                                Cross-Protocol & Pairwise Hypothesis Testing Matrix (Single-Split vs. 5-Fold OOF)
+                            </div>
+                            <div class="table-responsive">
+                                <table class="analytics-table" id="mcnemarMatrixTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Ensemble Method</th>
+                                            <th>Single Acc</th>
+                                            <th>5-Fold OOF Acc</th>
+                                            <th>Risk Diff [95% CI]</th>
+                                            <th>Cohen's h</th>
+                                            <th>Discordant (n10 / n01)</th>
+                                            <th>McNemar &chi;&sup2;</th>
+                                            <th>Exact p-value</th>
+                                            <th>Bonferroni (α=0.0083)</th>
+                                            <th>Statistical Power</th>
+                                            <th>Scientific Decision</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                            <div class="academic-note-box" style="margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 8px; background: rgba(59, 130, 246, 0.08); border-left: 3px solid #3b82f6; font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;">
+                                <strong><i class="fa-solid fa-circle-info"></i> Academic Notes:</strong> All pairwise comparisons between Single-Split and 5-Fold OOF maintain <em>p > 0.0083</em> after Bonferroni multiple testing correction for 6 simultaneous tests. Observed Cohen's |h| &lt; 0.06 confirms that discrete accuracy discrepancies between protocols are negligible.
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -168,6 +404,28 @@
                     </span>
                 </div>
                 <form id="pipelineForm" class="panel-content">
+                    <div class="form-group" style="margin-bottom: 1.25rem;">
+                        <label style="font-weight: 600; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between; font-size: 0.88rem;">
+                            <span><i class="fa-solid fa-layer-group" style="color: var(--accent-color); margin-right: 0.4rem;"></i>Training Protocol</span>
+                            <span class="badge" id="inferProtocolBadge">5-Fold OOF (20 Models)</span>
+                        </label>
+                        <div class="infer-protocol-grid" id="inferProtocolSwitcher">
+                            <button type="button" class="infer-protocol-btn active" data-protocol="oof" title="5-Fold Model Averaging (20 Models) & 7,192 OOF Meta-Learners">
+                                <i class="fa-solid fa-arrows-rotate"></i>
+                                <span>5-Fold OOF</span>
+                            </button>
+                            <button type="button" class="infer-protocol-btn" data-protocol="single" title="Single-Split 4 Backbones & 1,540 Val Meta-Learners">
+                                <i class="fa-solid fa-bolt"></i>
+                                <span>Single-Split</span>
+                            </button>
+                            <button type="button" class="infer-protocol-btn" data-protocol="dual" title="Comparative Inference: Run BOTH Single and OOF side-by-side">
+                                <i class="fa-solid fa-code-compare"></i>
+                                <span>Dual Mode</span>
+                            </button>
+                        </div>
+                        <input type="hidden" name="protocol" id="inferProtocolInput" value="oof">
+                    </div>
+
                     <div class="form-group">
                         <label style="font-weight: 600; margin-bottom: 0.75rem; display: block;">Select Classification Mode</label>
                         

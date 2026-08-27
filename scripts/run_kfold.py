@@ -45,7 +45,7 @@ def run_kfold_experiment(
     print(f"  RUNNING {n_splits}-FOLD CROSS VALIDATION: {model_name.upper()} ({config_path})")
     print(f"{'='*75}\n")
 
-    out_d = output_dir or os.path.join(cfg.checkpoint.save_dir, "kfold")
+    out_d = output_dir or os.path.join("RESULTS", "OOF_TRAINING", "outputs", model_name, "kfold")
 
     generator = OOFGenerator(
         config=cfg,
@@ -63,6 +63,7 @@ def run_all_kfold_experiments(
     split_seed: int = 42,
     force_retrain: bool = False,
     eval_ensemble: bool = True,
+    outputs_dir: str = "RESULTS/OOF_TRAINING/outputs",
 ) -> None:
     """Run 5-Fold Cross Validation sequentially across all configured backbone models and evaluate Meta-Learners."""
     if not config_paths:
@@ -75,10 +76,14 @@ def run_all_kfold_experiments(
 
     for i, cfg_path in enumerate(config_paths, 1):
         print(f"\n>>> Model {i}/{len(config_paths)}: {cfg_path}")
+        cfg = load_config(cfg_path)
+        m_name = cfg.model.name
+        m_out_d = os.path.join(outputs_dir, m_name, "kfold")
         run_kfold_experiment(
             cfg_path,
             n_splits=n_splits,
             split_seed=split_seed,
+            output_dir=m_out_d,
             force_retrain=force_retrain,
         )
 
@@ -88,7 +93,7 @@ def run_all_kfold_experiments(
         print(f"{'='*75}\n")
         try:
             from scripts.run_ensemble_eval import run_ensemble_evaluation
-            run_ensemble_evaluation(mode="oof", outputs_dir="outputs")
+            run_ensemble_evaluation(mode="oof", outputs_dir=outputs_dir)
         except Exception as e:
             print(f"Warning: Automatic ensemble evaluation failed: {e}")
 
@@ -123,17 +128,29 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip automatic Meta-Learner training after K-Fold completion",
     )
+    parser.add_argument(
+        "--outputs-dir",
+        default="RESULTS/OOF_TRAINING/outputs",
+        help="Directory to save K-Fold outputs (default: 'RESULTS/OOF_TRAINING/outputs')",
+    )
     args = parser.parse_args()
 
     if args.configs:
         valid_configs = [c for c in args.configs if os.path.basename(c) != "dataset.yaml"]
         for c in valid_configs:
+            cfg = load_config(c)
+            m_name = cfg.model.name
+            m_out_d = os.path.join(args.outputs_dir, m_name, "kfold")
             run_kfold_experiment(
                 c,
                 n_splits=args.folds,
                 split_seed=args.seed,
+                output_dir=m_out_d,
                 force_retrain=args.force_retrain,
             )
+        if not args.no_ensemble:
+            from scripts.run_ensemble_eval import run_ensemble_evaluation
+            run_ensemble_evaluation(mode="oof", outputs_dir=args.outputs_dir)
     else:
         run_all_kfold_experiments(
             config_paths=None,
@@ -141,4 +158,5 @@ if __name__ == "__main__":
             split_seed=args.seed,
             force_retrain=args.force_retrain,
             eval_ensemble=not args.no_ensemble,
+            outputs_dir=args.outputs_dir,
         )

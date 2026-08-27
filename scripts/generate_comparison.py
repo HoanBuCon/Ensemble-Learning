@@ -71,8 +71,17 @@ def generate_base_comparison_report(
             if os.path.isdir(save_d):
                 model_dirs.append(save_d)
     else:
-        # Check target outputs_dir, and fallback to OOF_Results / Default_Results if empty
-        search_dirs = [outputs_dir, "OOF_Results/outputs", "Default_Results/outputs", "Default_Result_V2/outputs"]
+        # Check target outputs_dir, and fallback to RESULTS / OOF_Results / Default_Results if empty
+        search_dirs = [
+            outputs_dir,
+            "RESULTS/DEFAULT_TRAINING/outputs",
+            "RESULTS/OOF_TRAINING/outputs",
+            "RESULTS/DEFAULT_TRAINING",
+            "RESULTS/OOF_TRAINING",
+            "Default_Result_V2/outputs",
+            "OOF_Results/outputs",
+            "Default_Results/outputs",
+        ]
         valid_dirs = []
         resolved_out_dir = outputs_dir
 

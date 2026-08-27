@@ -46,6 +46,7 @@ reports/
 *.pt
 *.onnx
 *.engine
+RESULTS/
 
 # Tensorboard & Cache
 runs/

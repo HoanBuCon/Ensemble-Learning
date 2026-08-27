@@ -112,7 +112,7 @@ class TrainConfig:
 class CheckpointConfig:
     """Checkpoint saving configuration."""
 
-    save_dir: str = "./outputs/default"
+    save_dir: str = "./RESULTS/DEFAULT_TRAINING/outputs/default"
     save_best: bool = True
     save_last: bool = True
     monitor: str = "val_accuracy"
@@ -281,6 +281,9 @@ def load_dataset_config(dataset_cfg_path: str = "configs/dataset.yaml") -> Dict[
                     "task_type": ds_info.get("task_type", "multi_class_classification"),
                     "num_classes": len(classes),
                     "data_root": ds_info.get("data_root", "./data"),
+                    "train_dir": ds_info.get("train_dir", "./data/train"),
+                    "val_dir": ds_info.get("val_dir", "./data/val"),
+                    "test_dir": ds_info.get("test_dir", "./data/test"),
                     "classes": classes,
                     "display_names": display_names,
                 }

@@ -49,7 +49,7 @@ train:
   label_smoothing: 0.1
 
 checkpoint:
-  save_dir: ./outputs/efficientnet_b0
+  save_dir: ./RESULTS/DEFAULT_TRAINING/outputs/efficientnet_b0
   save_best: true
   save_last: true
   monitor: val_accuracy
