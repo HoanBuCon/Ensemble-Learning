@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional
 
 import joblib
 import numpy as np
+import yaml
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
@@ -50,12 +51,27 @@ from src.ensemble.base import EnsembleBase
 
 
 def _get_xgboost():
-    """Lazy import XGBoost — returns None if not installed."""
+    """Lazy import XGBoost and fail explicitly when it is unavailable."""
     try:
         from xgboost import XGBClassifier
         return XGBClassifier
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise ImportError(
+            "XGBoost is required for the canonical xgboost stacker"
+        ) from exc
+
+
+def load_stacking_config(path: str = "configs/ensemble.yaml") -> Dict[str, Dict[str, Any]]:
+    """Load the single canonical meta-learner configuration."""
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle)
+    stacking = payload.get("stacking") if isinstance(payload, dict) else None
+    required = {"logistic_regression", "random_forest", "xgboost"}
+    if not isinstance(stacking, dict) or set(stacking) != required:
+        raise ValueError(
+            f"Canonical stacking config must define exactly {sorted(required)}"
+        )
+    return stacking
 
 
 class StackingEnsemble(EnsembleBase):
@@ -72,24 +88,24 @@ class StackingEnsemble(EnsembleBase):
         meta_params: Optional keyword arguments for the meta-learner constructor.
     """
 
-    _LEARNER_MAP = {
-        "logistic_regression": lambda **kw: LogisticRegression(
-            max_iter=1000, solver="lbfgs",
-            random_state=42, **kw,
-        ),
-        "random_forest": lambda **kw: RandomForestClassifier(
-            n_estimators=200, random_state=42, n_jobs=-1, **kw,
-        ),
-    }
-
     def __init__(
         self,
         meta_learner: str = "logistic_regression",
         meta_params: Optional[Dict[str, Any]] = None,
+        config_path: str = "configs/ensemble.yaml",
     ) -> None:
         self.meta_learner_name = meta_learner
-        self.meta_params = meta_params or {}
+        canonical = load_stacking_config(config_path)
+        if meta_learner not in canonical:
+            raise ValueError(
+                f"Unknown meta-learner '{meta_learner}'. Available: {sorted(canonical)}"
+            )
+        self.meta_params = dict(canonical[meta_learner])
+        if meta_params:
+            self.meta_params.update(meta_params)
+        self.config_path = config_path
         self._model = None
+        self.feature_dimension: Optional[int] = None
 
         self._build_model()
 
@@ -99,25 +115,13 @@ class StackingEnsemble(EnsembleBase):
 
         if name == "xgboost":
             XGBClassifier = _get_xgboost()
-            if XGBClassifier is None:
-                raise ImportError(
-                    "XGBoost is not installed. Install with: pip install xgboost"
-                )
-            self._model = XGBClassifier(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.1,
-                random_state=42,
-                eval_metric="mlogloss",
-                **self.meta_params,
-            )
-        elif name in self._LEARNER_MAP:
-            self._model = self._LEARNER_MAP[name](**self.meta_params)
+            self._model = XGBClassifier(**self.meta_params)
+        elif name == "logistic_regression":
+            self._model = LogisticRegression(**self.meta_params)
+        elif name == "random_forest":
+            self._model = RandomForestClassifier(**self.meta_params)
         else:
-            available = list(self._LEARNER_MAP.keys()) + ["xgboost"]
-            raise ValueError(
-                f"Unknown meta-learner '{name}'. Available: {available}"
-            )
+            raise AssertionError(f"Unhandled canonical meta-learner: {name}")
 
     @staticmethod
     def _stack_features(probabilities: List[np.ndarray]) -> np.ndarray:
@@ -130,6 +134,14 @@ class StackingEnsemble(EnsembleBase):
         Returns:
             Stacked feature matrix of shape ``(N, M * C)``.
         """
+        if not probabilities:
+            raise ValueError("Stacking requires at least one probability matrix")
+        row_count = probabilities[0].shape[0]
+        if any(
+            matrix.ndim != 2 or matrix.shape[0] != row_count
+            for matrix in probabilities
+        ):
+            raise ValueError("Stacking probability matrices are not row-aligned")
         return np.concatenate(probabilities, axis=1)
 
     def fit(
@@ -151,6 +163,7 @@ class StackingEnsemble(EnsembleBase):
             ``self`` with a trained meta-learner.
         """
         X = self._stack_features(probabilities)
+        self.feature_dimension = int(X.shape[1])
         self._model.fit(X, labels)
         return self
 
@@ -194,7 +207,14 @@ class StackingEnsemble(EnsembleBase):
             path: File path for the serialized model.
         """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        joblib.dump(self._model, path)
+        if not hasattr(self._model, "classes_"):
+            raise RuntimeError("Stacking model must be fitted before serialization")
+        if self.meta_learner_name == "xgboost":
+            if not path.lower().endswith(".json"):
+                raise ValueError("Canonical XGBoost artifact must use a .json path")
+            self._model.save_model(path)
+        else:
+            joblib.dump(self._model, path)
 
     def load(self, path: str) -> "StackingEnsemble":
         """
@@ -206,5 +226,12 @@ class StackingEnsemble(EnsembleBase):
         Returns:
             ``self`` with loaded meta-learner.
         """
-        self._model = joblib.load(path)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Stacking artifact not found: {path}")
+        if self.meta_learner_name == "xgboost":
+            self._model.load_model(path)
+        else:
+            self._model = joblib.load(path)
+        feature_count = getattr(self._model, "n_features_in_", None)
+        self.feature_dimension = int(feature_count) if feature_count is not None else None
         return self

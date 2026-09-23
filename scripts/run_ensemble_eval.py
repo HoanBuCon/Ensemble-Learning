@@ -1,472 +1,302 @@
-"""
-Ensemble Evaluation Runner Script
-=================================
-
-Evaluates all ensemble methods (Hard Voting, Soft Voting, Weighted Voting,
-and Stacking Ensembles) using the prediction probabilities of trained 
-backbone models.
-
-CLI::
-
-    python scripts/run_ensemble_eval.py --mode val
-    python scripts/run_ensemble_eval.py --mode oof
-    python main.py ensemble --mode val
-"""
+"""Fit, serialize, replay, and evaluate canonical FINAL_V2 ensembles."""
 
 from __future__ import annotations
 
 import argparse
-import glob
-import json
 import os
-import re
 import sys
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Sequence, Tuple
 
-# Ensure project root is in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import numpy as np
 import pandas as pd
-import torch
+import yaml
 
-from src.datasets.dataset import create_dataloaders
-from src.engine.evaluator import run_inference
-from src.ensemble import (
-    HardVoting,
-    SoftVoting,
-    WeightedVoting,
-    StackingEnsemble,
+from src.ensemble.artifacts import (
+    PredictionArtifact,
+    load_prediction_artifact,
+    save_ensemble_manifest,
+    save_prediction_artifact,
+    validate_prediction_alignment,
 )
-from src.ensemble.base import EnsembleBase
-from src.ensemble.oof import OOFGenerator
-from src.models.factory import create_model
-from src.utils.config import load_config, load_dataset_config
+from src.ensemble.stacking import StackingEnsemble
+from src.ensemble.voting import HardVoting, SoftVoting, WeightedVoting
 from src.utils.metrics import compute_metrics
+from src.utils.provenance import (
+    sha256_file,
+    verify_dataset_snapshot,
+    write_experiment_manifest,
+    write_json,
+)
 
 
-def get_latest_model_dirs(outputs_dir: str = "outputs") -> List[str]:
-    """Find latest directory for each base model in outputs_dir (supports standard and kfold)."""
-    search_dirs = [outputs_dir]
-    if os.path.isdir(outputs_dir):
-        primary_valid = [
-            d for d in glob.glob(os.path.join(outputs_dir, "*"))
-            if os.path.isdir(d) and (
-                os.path.exists(os.path.join(d, "probabilities.npy"))
-                or os.path.exists(os.path.join(d, "test_probabilities.npy"))
-                or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
-                or os.path.exists(os.path.join(d, "kfold", "test_probabilities.npy"))
-            )
-        ]
-        if not primary_valid:
-            search_dirs.extend([
-                "RESULTS/DEFAULT_TRAINING/outputs",
-                "RESULTS/OOF_TRAINING/outputs",
-                "RESULTS/DEFAULT_TRAINING",
-                "RESULTS/OOF_TRAINING",
-                "Default_Result_V2/outputs",
-                "OOF_Results/outputs",
-            ])
+def _load_config(path: str = "configs/ensemble.yaml") -> Dict[str, object]:
+    with open(path, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict) or not config.get("base_model_order"):
+        raise ValueError(f"Invalid canonical ensemble config: {path}")
+    return config
+
+
+def _protocol_paths(
+    protocol: str,
+    results_root: str,
+    base_model_order: Sequence[str],
+) -> Tuple[Dict[str, str], Dict[str, str], str]:
+    if protocol == "single_split":
+        root = Path(results_root) / "single_split"
+        fit_name = "val_predictions.npz"
+        test_name = "test_predictions.npz"
+        fit_split = "val"
+        model_dirs = {name: root / name for name in base_model_order}
+    elif protocol == "oof":
+        root = Path(results_root) / "oof"
+        fit_name = "oof_predictions.npz"
+        test_name = "test_predictions.npz"
+        fit_split = "oof_train"
+        model_dirs = {name: root / name / "kfold" for name in base_model_order}
     else:
-        search_dirs.extend([
-            "RESULTS/DEFAULT_TRAINING/outputs",
-            "RESULTS/OOF_TRAINING/outputs",
-            "RESULTS/DEFAULT_TRAINING",
-            "RESULTS/OOF_TRAINING",
-            "Default_Result_V2/outputs",
-            "OOF_Results/outputs",
-        ])
+        raise ValueError("protocol must be exactly 'single_split' or 'oof'")
 
-    all_dirs = []
-    for s in search_dirs:
-        if os.path.isdir(s):
-            all_dirs.extend(sorted(glob.glob(os.path.join(s, "*"))))
-
-    valid_dirs = [
-        d for d in all_dirs
-        if os.path.isdir(d) and os.path.basename(d) not in ["oof", "val", "ensemble", "default", "tensorboard", "verification"] and (
-            os.path.exists(os.path.join(d, "probabilities.npy"))
-            or os.path.exists(os.path.join(d, "test_probabilities.npy"))
-            or os.path.exists(os.path.join(d, "kfold", "oof_probabilities.npy"))
-            or os.path.exists(os.path.join(d, "kfold", "test_probabilities.npy"))
-        )
-    ]
-
-    model_groups: Dict[str, List[tuple[int, str]]] = {}
-    for d in valid_dirs:
-        folder_name = os.path.basename(d)
-        match = re.match(r"^(.*?)(?:_(\d+))?$", folder_name)
-        if match:
-            base_name = match.group(1)
-            version = int(match.group(2)) if match.group(2) else 0
-            if base_name not in model_groups:
-                model_groups[base_name] = []
-            model_groups[base_name].append((version, d))
-
-    latest_dirs = []
-    for base_name, versions in sorted(model_groups.items()):
-        versions.sort(key=lambda x: x[0], reverse=True)
-        latest_dirs.append(versions[0][1])
-
-    return sorted(latest_dirs)
+    fit_paths = {name: str(path / fit_name) for name, path in model_dirs.items()}
+    test_paths = {name: str(path / test_name) for name, path in model_dirs.items()}
+    return fit_paths, test_paths, fit_split
 
 
-def generate_val_predictions_if_missing(model_dirs: List[str]) -> None:
-    """Generate val_probabilities.npy and val_labels.npy if missing."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def _load_aligned(
+    paths: Dict[str, str],
+    model_order: Sequence[str],
+    protocol: str,
+    split: str,
+) -> List[PredictionArtifact]:
+    artifacts = [load_prediction_artifact(paths[name]) for name in model_order]
+    validate_prediction_alignment(
+        artifacts,
+        expected_protocol=protocol,
+        expected_split=split,
+    )
+    return artifacts
 
-    for m_dir in model_dirs:
-        val_prob_path = os.path.join(m_dir, "val_probabilities.npy")
-        val_label_path = os.path.join(m_dir, "val_labels.npy")
 
-        if os.path.exists(val_prob_path) and os.path.exists(val_label_path):
-            continue
+def _save_method_prediction(
+    path: Path,
+    method: str,
+    protocol: str,
+    reference: PredictionArtifact,
+    probabilities: np.ndarray,
+) -> None:
+    save_prediction_artifact(
+        str(path),
+        sample_ids=reference.sample_ids,
+        y_true=reference.y_true,
+        probabilities=probabilities,
+        predictions=np.argmax(probabilities, axis=1),
+        class_order=reference.class_order,
+        protocol=protocol,
+        method=method,
+        split="test",
+    )
 
-        m_name = os.path.basename(m_dir)
-        config_name = re.sub(r"_\d+$", "", m_name)
-        config_path = os.path.join("configs", f"{config_name}.yaml")
 
-        if not os.path.exists(config_path):
-            print(f"Config file for {m_name} not found at {config_path}. Skipping.")
-            continue
+def _metrics_row(method: str, method_type: str, metrics: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "Method": method,
+        "Type": method_type,
+        "Accuracy": float(metrics["accuracy"]),
+        "Precision": float(metrics["precision"]),
+        "Recall": float(metrics["recall"]),
+        "F1_Score": float(metrics["f1_score"]),
+    }
 
-        print(f"--> Generating Validation predictions for {m_name}...")
-        cfg = load_config(config_path)
 
-        ckpt_path = os.path.join(m_dir, "best_model.pth")
-        if not os.path.exists(ckpt_path):
-            kfold_ckpts = sorted(glob.glob(os.path.join(m_dir, "kfold", "fold_*", "best_model.pth")))
-            if kfold_ckpts:
-                ckpt_path = kfold_ckpts[0]
-
-        if not os.path.exists(ckpt_path):
-            print(f"Checkpoint for {m_name} not found at {ckpt_path}. Skipping.")
-            continue
-
-        model = create_model(
-            model_name=cfg.model.name,
-            pretrained=False,
-            num_classes=cfg.model.num_classes,
-        )
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        state_dict = ckpt.get("model_state_dict", ckpt)
-        model.load_state_dict(state_dict)
-
-        cfg.data.num_workers = 0
-        _, val_loader, _, _ = create_dataloaders(cfg)
-        _, val_probs, _, val_labels, _ = run_inference(model, val_loader, device=device)
-
-        np.save(val_prob_path, val_probs)
-        np.save(val_label_path, val_labels)
-        print(f"  Saved Validation predictions: {val_probs.shape}")
+def _record_method(
+    method: str,
+    method_type: str,
+    probabilities: np.ndarray,
+    protocol: str,
+    reference: PredictionArtifact,
+    prediction_dir: Path,
+    class_order: List[str],
+    rows: List[Dict[str, object]],
+    full_metrics: Dict[str, object],
+) -> None:
+    predictions = np.argmax(probabilities, axis=1)
+    metrics = compute_metrics(reference.y_true, predictions, class_names=class_order)
+    full_metrics[method] = metrics
+    rows.append(_metrics_row(method, method_type, metrics))
+    _save_method_prediction(
+        prediction_dir / f"{method}.npz",
+        method,
+        protocol,
+        reference,
+        probabilities,
+    )
 
 
 def run_ensemble_evaluation(
-    mode: str = "val",
-    outputs_dir: Optional[str] = None,
+    protocol: str | None = None,
+    results_root: str = "RESULTS/FINAL_V2",
+    ensemble_config_path: str = "configs/ensemble.yaml",
+    *,
+    mode: str | None = None,
+    outputs_dir: str | None = None,
 ) -> pd.DataFrame:
-    """
-    Run full ensemble evaluation pipeline.
+    """Run a strict protocol-isolated ensemble evaluation without hidden refits."""
+    verify_dataset_snapshot()
+    if protocol is None:
+        aliases = {"val": "single_split", "single_split": "single_split", "oof": "oof"}
+        if mode not in aliases:
+            raise ValueError("An explicit single_split or oof protocol is required")
+        protocol = aliases[mode]
+    if outputs_dir is not None:
+        normalized = os.path.normpath(outputs_dir)
+        expected = os.path.normpath(results_root)
+        if normalized != expected:
+            raise ValueError(
+                "Historical/cross-protocol output roots are rejected; "
+                f"expected {expected}, received {normalized}"
+            )
+    config = _load_config(ensemble_config_path)
+    model_order = [str(value) for value in config["base_model_order"]]
+    fit_paths, test_paths, fit_split = _protocol_paths(
+        protocol, results_root, model_order
+    )
+    fit_artifacts = _load_aligned(
+        fit_paths, model_order, protocol=protocol, split=fit_split
+    )
+    test_artifacts = _load_aligned(
+        test_paths, model_order, protocol=protocol, split="test"
+    )
+    if not np.array_equal(fit_artifacts[0].class_order, test_artifacts[0].class_order):
+        raise ValueError("Fit/test class_order mismatch")
 
-    Supports:
-        - mode='val': Single-Split Fast Mode (Meta-Learners fit on validation split)
-        - mode='oof': 5-Fold Cross-Validation Mode (Meta-Learners fit on 5-Fold OOF predictions)
-    """
-    mode = mode.lower()
-    if mode not in ["val", "oof"]:
-        raise ValueError(f"Invalid mode '{mode}'. Expected 'val' or 'oof'.")
+    fit_probabilities = [artifact.probabilities for artifact in fit_artifacts]
+    test_probabilities = [artifact.probabilities for artifact in test_artifacts]
+    fit_labels = fit_artifacts[0].y_true
+    test_reference = test_artifacts[0]
+    class_order = test_reference.class_order.tolist()
 
-    # Route outputs_dir based on mode if default or unspecified
-    if outputs_dir is None or outputs_dir in ["outputs", "./outputs"]:
-        if mode == "oof":
-            outputs_dir = "RESULTS/OOF_TRAINING/outputs"
-        else:
-            outputs_dir = "RESULTS/DEFAULT_TRAINING/outputs"
+    output_dir = Path(results_root) / protocol / "ensembles"
+    artifact_dir = output_dir / "ensemble_artifacts"
+    prediction_dir = output_dir / "predictions"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    prediction_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n>>> SELECTED MODE: {mode.upper()} (Target outputs directory: {outputs_dir}) <<<\n")
+    input_hashes = {name: sha256_file(fit_paths[name]) for name in model_order}
+    model_artifact_paths: Dict[str, str] = {}
+    rows: List[Dict[str, object]] = []
+    full_metrics: Dict[str, object] = {}
 
-    model_dirs = get_latest_model_dirs(outputs_dir)
-    if not model_dirs:
-        print(f"No trained model outputs found in '{outputs_dir}'. Train models first.")
-        return pd.DataFrame()
+    for name, artifact in zip(model_order, test_artifacts):
+        metrics = compute_metrics(
+            artifact.y_true, artifact.predictions, class_names=class_order
+        )
+        full_metrics[f"base_{name}"] = metrics
+        rows.append(_metrics_row(f"base_{name}", "base", metrics))
 
-    base_models = [re.sub(r"_\d+$", "", os.path.basename(d)) for d in model_dirs]
-    class_mappings = []
-    for d in model_dirs:
-        cmap_path = os.path.join(d, "class_to_idx.json")
-        if not os.path.exists(cmap_path):
-            cmap_path = os.path.join(d, "kfold", "class_to_idx.json")
-        if os.path.exists(cmap_path):
-            with open(cmap_path, "r", encoding="utf-8") as f:
-                class_mappings.append(json.load(f))
-    if class_mappings:
-        EnsembleBase.validate_class_mappings(class_mappings)
+    hard_probabilities = HardVoting().predict_proba(test_probabilities)
+    _record_method(
+        "hard_voting", "voting", hard_probabilities, protocol,
+        test_reference, prediction_dir, class_order, rows, full_metrics,
+    )
 
-    # Load test probabilities & labels
-    base_test_probs_list = []
-    base_test_labels = None
+    soft_probabilities = SoftVoting().predict_proba(test_probabilities)
+    _record_method(
+        "soft_voting", "voting", soft_probabilities, protocol,
+        test_reference, prediction_dir, class_order, rows, full_metrics,
+    )
 
-    for m_dir in model_dirs:
-        # Check kfold/test_probabilities.npy first, then root
-        prob_path = os.path.join(m_dir, "kfold", "test_probabilities.npy")
-        if not os.path.exists(prob_path):
-            prob_path = os.path.join(m_dir, "test_probabilities.npy")
-        if not os.path.exists(prob_path):
-            prob_path = os.path.join(m_dir, "probabilities.npy")
+    weighted_config = config["weighted_voting"]
+    weighted = WeightedVoting(
+        epsilon=float(weighted_config["epsilon"]),
+        max_iter=int(weighted_config["max_iterations"]),
+        ftol=float(weighted_config["ftol"]),
+    ).fit(fit_probabilities, fit_labels)
+    weighted_path = artifact_dir / "weighted_voting.json"
+    weighted.save(
+        str(weighted_path),
+        base_model_order=model_order,
+        fit_split=fit_split,
+        input_probability_hashes=input_hashes,
+    )
+    model_artifact_paths["weighted_voting"] = str(weighted_path)
+    weighted_probabilities = WeightedVoting.load(str(weighted_path)).predict_proba(
+        test_probabilities
+    )
+    _record_method(
+        "weighted_voting", "voting", weighted_probabilities, protocol,
+        test_reference, prediction_dir, class_order, rows, full_metrics,
+    )
 
-        label_path = os.path.join(m_dir, "test_labels.npy")
-        if not os.path.exists(label_path):
-            label_path = os.path.join(m_dir, "labels.npy")
+    stacking_artifacts = {
+        "logistic_regression": artifact_dir / "stacking_lr.joblib",
+        "random_forest": artifact_dir / "stacking_rf.joblib",
+        "xgboost": artifact_dir / "stacking_xgb.json",
+    }
+    for learner_name, artifact_path in stacking_artifacts.items():
+        StackingEnsemble(
+            learner_name, config_path=ensemble_config_path
+        ).fit(fit_probabilities, fit_labels).save(str(artifact_path))
+        model_artifact_paths[f"stacking_{learner_name}"] = str(artifact_path)
+        replayed = StackingEnsemble(
+            learner_name, config_path=ensemble_config_path
+        ).load(str(artifact_path))
+        probabilities = replayed.predict_proba(test_probabilities)
+        _record_method(
+            f"stacking_{learner_name}", "stacking", probabilities, protocol,
+            test_reference, prediction_dir, class_order, rows, full_metrics,
+        )
 
-        if os.path.exists(prob_path):
-            probs = np.load(prob_path)
-            base_test_probs_list.append(probs)
+    save_ensemble_manifest(
+        str(artifact_dir / "ensemble_manifest.json"),
+        protocol=protocol,
+        class_order=class_order,
+        base_model_order=model_order,
+        feature_dimension=sum(
+            artifact.probabilities.shape[1] for artifact in fit_artifacts
+        ),
+        fit_split=fit_split,
+        input_paths=fit_paths,
+        model_artifact_paths=model_artifact_paths,
+    )
+    write_experiment_manifest(
+        output_dir / "experiment_manifest.json",
+        protocol=protocol,
+        model="canonical_ensemble_suite",
+        config_path=ensemble_config_path,
+        seed=42,
+        checkpoint_path=artifact_dir / "ensemble_manifest.json",
+        prediction_path=prediction_dir / "weighted_voting.npz",
+        arguments={
+            "base_model_order": model_order,
+            "fit_split": fit_split,
+        },
+    )
+    write_json(str(output_dir / "ensemble_full_metrics.json"), full_metrics)
 
-        if base_test_labels is None and os.path.exists(label_path):
-            base_test_labels = np.load(label_path)
-
-    # Fallback to load test labels from dataset if missing in output folders
-    ds_cfg_raw = load_dataset_config()
-    ds_dict = ds_cfg_raw.get("dataset", ds_cfg_raw)
-    class_names = ds_dict.get("classes", [])
-
-    if base_test_labels is None:
-        from src.datasets.dataset import ImageFolderDataset
-        test_dir = ds_dict.get("test_dir", os.path.join(ds_dict.get("data_root", "./data"), "test"))
-        if not os.path.isdir(test_dir):
-            test_dir = os.path.join("data", "test")
-
-        if os.path.isdir(test_dir):
-            test_ds = ImageFolderDataset(root=test_dir)
-            base_test_labels = np.array([s[1] for s in test_ds.samples])
-
-    test_labels = base_test_labels
-
-    # Prepare training probabilities & labels for Meta-Learner
-    if mode == "val":
-        generate_val_predictions_if_missing(model_dirs)
-        val_probs_list = []
-        val_labels = None
-        for m_dir in model_dirs:
-            v_prob = np.load(os.path.join(m_dir, "val_probabilities.npy"))
-            v_lbl = np.load(os.path.join(m_dir, "val_labels.npy"))
-            val_probs_list.append(v_prob)
-            if val_labels is None:
-                val_labels = v_lbl
-
-        meta_train_probs = val_probs_list
-        meta_train_labels = val_labels
-    else: # mode == 'oof'
-        meta_train_probs = []
-        meta_train_labels = None
-        for m_dir in model_dirs:
-            oof_p_path = os.path.join(m_dir, "kfold", "oof_probabilities.npy")
-            oof_l_path = os.path.join(m_dir, "kfold", "oof_labels.npy")
-            if not os.path.exists(oof_p_path):
-                oof_p_path = os.path.join(m_dir, "oof", "oof_probabilities.npy")
-                oof_l_path = os.path.join(m_dir, "oof", "oof_labels.npy")
-
-            if os.path.exists(oof_p_path) and os.path.exists(oof_l_path):
-                oof_probs = np.load(oof_p_path)
-                oof_lbls = np.load(oof_l_path)
-                meta_train_probs.append(oof_probs)
-                if meta_train_labels is None:
-                    meta_train_labels = oof_lbls
-            else:
-                m_name = re.sub(r"_\d+$", "", os.path.basename(m_dir))
-                cfg_path = os.path.join("configs", f"{m_name}.yaml")
-                if not os.path.exists(cfg_path):
-                    print(f"Config path for {m_name} not found at {cfg_path}. Skipping.")
-                    continue
-                oof_gen = OOFGenerator(config=cfg_path, output_dir=os.path.join(m_dir, "kfold"))
-                oof_probs, oof_lbls, _ = oof_gen.generate()
-                meta_train_probs.append(oof_probs)
-                if meta_train_labels is None:
-                    meta_train_labels = oof_lbls
-
-    meta_test_probs = base_test_probs_list
-
-    # Single Model Baseline Results on Test Set
-    single_model_results = []
-    full_metrics_store = {}
-
-    for m_name, probs in zip(base_models, meta_test_probs):
-        m_metrics = compute_metrics(test_labels, np.argmax(probs, axis=1), class_names=class_names)
-        full_metrics_store[f"Single Model ({m_name})"] = m_metrics
-        single_model_results.append({
-            "Method": f"Single Model ({m_name})",
-            "Type": "Individual",
-            "Accuracy": m_metrics["accuracy"] * 100,
-            "Precision": m_metrics["precision"] * 100,
-            "Recall": m_metrics["recall"] * 100,
-            "F1_Score": m_metrics["f1_score"] * 100,
-            "Details": "-",
-        })
-
-    best_single_acc = max(r["Accuracy"] for r in single_model_results)
-
-    # Ensemble Methods Evaluation
-    ensemble_evaluations = []
-    per_class_rows = []
-
-    # 1. Hard Voting
-    hv = HardVoting()
-    hv_metrics = hv.evaluate(meta_test_probs, test_labels, class_names=class_names)
-    full_metrics_store["Hard Voting Ensemble"] = hv_metrics
-    ensemble_evaluations.append({
-        "Method": "Hard Voting Ensemble",
-        "Type": "Ensemble (Voting)",
-        "Accuracy": hv_metrics["accuracy"] * 100,
-        "Precision": hv_metrics["precision"] * 100,
-        "Recall": hv_metrics["recall"] * 100,
-        "F1_Score": hv_metrics["f1_score"] * 100,
-        "Details": "Majority vote across predictions",
-    })
-
-    # 2. Soft Voting
-    sv = SoftVoting()
-    sv_metrics = sv.evaluate(meta_test_probs, test_labels, class_names=class_names)
-    full_metrics_store["Soft Voting Ensemble"] = sv_metrics
-    ensemble_evaluations.append({
-        "Method": "Soft Voting Ensemble",
-        "Type": "Ensemble (Voting)",
-        "Accuracy": sv_metrics["accuracy"] * 100,
-        "Precision": sv_metrics["precision"] * 100,
-        "Recall": sv_metrics["recall"] * 100,
-        "F1_Score": sv_metrics["f1_score"] * 100,
-        "Details": "Equal weight probability averaging",
-    })
-
-    # 3. Weighted Voting
-    wv = WeightedVoting()
-    wv.fit(meta_train_probs, meta_train_labels)
-    wv_metrics = wv.evaluate(meta_test_probs, test_labels, class_names=class_names)
-    full_metrics_store["Weighted Voting Ensemble"] = wv_metrics
-    w_str = ", ".join(f"{name}: {w:.2f}" for name, w in zip(base_models, wv.weights))
-    ensemble_evaluations.append({
-        "Method": "Weighted Voting Ensemble",
-        "Type": "Ensemble (Voting)",
-        "Accuracy": wv_metrics["accuracy"] * 100,
-        "Precision": wv_metrics["precision"] * 100,
-        "Recall": wv_metrics["recall"] * 100,
-        "F1_Score": wv_metrics["f1_score"] * 100,
-        "Details": f"Optimized weights ({w_str})",
-    })
-
-    # 4. Stacking Ensembles
-    meta_learners = ["logistic_regression", "random_forest", "xgboost"]
-    fit_label = "Validation Set" if mode == "val" else "5-Fold OOF Train Set"
-
-    for meta in meta_learners:
-        m_label = f"Stacking ({meta.replace('_', ' ').title()})"
-        stk = StackingEnsemble(meta_learner=meta)
-        stk.fit(meta_train_probs, meta_train_labels)
-        stk_metrics = stk.evaluate(meta_test_probs, test_labels, class_names=class_names)
-        full_metrics_store[m_label] = stk_metrics
-        ensemble_evaluations.append({
-            "Method": m_label,
-            "Type": "Ensemble (Stacking)",
-            "Accuracy": stk_metrics["accuracy"] * 100,
-            "Precision": stk_metrics["precision"] * 100,
-            "Recall": stk_metrics["recall"] * 100,
-            "F1_Score": stk_metrics["f1_score"] * 100,
-            "Details": f"Meta-learner: {meta} (Fit on {fit_label})",
-        })
-
-    # Build Per-Class Breakdown DataFrame
-    for method_name, m_dict in full_metrics_store.items():
-        per_cls = m_dict.get("per_class", {})
-        for c_name, c_data in per_cls.items():
-            per_class_rows.append({
-                "Method": method_name,
-                "Disease_Class": c_name,
-                "Precision": f"{c_data['precision'] * 100:.2f}%",
-                "Recall": f"{c_data['recall'] * 100:.2f}%",
-                "F1_Score": f"{c_data['f1_score'] * 100:.2f}%",
-                "Support": c_data['support'],
-            })
-    df_per_class = pd.DataFrame(per_class_rows)
-
-    # Combine overall results
-    all_results = single_model_results + ensemble_evaluations
-    df_results = pd.DataFrame(all_results)
-
-    # Compute improvement over best single model
-    improvements = []
-    for _, row in df_results.iterrows():
-        diff = row["Accuracy"] - best_single_acc
-        if abs(diff) < 1e-6 and row["Type"] == "Individual":
-            improvements.append("Base (0.00%)")
-        else:
-            sign = "+" if diff >= 0 else ""
-            improvements.append(f"{sign}{diff:.2f}%")
-
-    df_results.insert(3, "Improvement", improvements)
-
-    # Output save directory
-    mode_output_dir = os.path.join(outputs_dir, mode)
-    os.makedirs(mode_output_dir, exist_ok=True)
-
-    csv_path = os.path.join(mode_output_dir, "ensemble_comparison.csv")
-    md_path = os.path.join(mode_output_dir, "ensemble_comparison.md")
-    per_class_csv_path = os.path.join(mode_output_dir, "ensemble_per_class_report.csv")
-    per_class_md_path = os.path.join(mode_output_dir, "ensemble_per_class_report.md")
-    full_json_path = os.path.join(mode_output_dir, "ensemble_full_metrics.json")
-
-    # Format percentage strings for saved tables
-    formatted_df = df_results.copy()
-    for col in ["Accuracy", "Precision", "Recall", "F1_Score"]:
-        formatted_df[col] = formatted_df[col].apply(lambda x: f"{x:.2f}%")
-
-    formatted_df.to_csv(csv_path, index=False)
-    df_per_class.to_csv(per_class_csv_path, index=False)
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(f"# Ensemble Methods Structured Benchmark Comparison (Mode: {mode.upper()})\n\n")
-        f.write(formatted_df.to_markdown(index=False))
-
-    with open(per_class_md_path, "w", encoding="utf-8") as f:
-        f.write(f"# Ensemble Methods Per-Class Disease Detailed Report (Mode: {mode.upper()})\n\n")
-        f.write(df_per_class.to_markdown(index=False))
-
-    with open(full_json_path, "w", encoding="utf-8") as f:
-        json.dump(full_metrics_store, f, indent=2)
-
-    print(f"\n\n{'='*60}")
-    print(f"  ENSEMBLE FINAL METRICS SUMMARY (MODE: {mode.upper()})")
-    print(f"{'='*60}\n")
-    print(formatted_df.to_string(index=False))
-    print(f"\n  Results saved to:")
-    print(f"   - Main Summary CSV: {csv_path}")
-    print(f"   - Per-Class Report CSV: {per_class_csv_path}")
-    print(f"   - Per-Class Report Markdown: {per_class_md_path}")
-    print(f"   - Full JSON Dump: {full_json_path}\n")
-
-    # Automatically generate full visual diagnostic charts and per-method breakdowns
-    try:
-        from scripts.generate_all_plots import generate_ensemble_plots
-        generate_ensemble_plots(outputs_dir=outputs_dir, mode=mode, class_names=class_names)
-    except Exception as e:
-        print(f"  Warning: Could not auto-generate ensemble plots: {e}")
-
-    return df_results
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output_dir / "ensemble_comparison.csv", index=False)
+    with (output_dir / "ensemble_comparison.md").open("w", encoding="utf-8") as handle:
+        handle.write(f"# Canonical ensemble evaluation ({protocol})\n\n")
+        handle.write(frame.to_markdown(index=False))
+        handle.write("\n")
+    return frame
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Ensemble Evaluation Pipeline")
-    parser.add_argument(
-        "--mode",
-        choices=["val", "oof"],
-        default="val",
-        help="Evaluation mode: 'val' (Fast validation split ~30s) or 'oof' (Full 5-Fold OOF ~10-13 hrs)",
+    parser = argparse.ArgumentParser(
+        description="Run canonical, protocol-isolated FINAL_V2 ensembles"
     )
-    parser.add_argument(
-        "--outputs-dir",
-        default="outputs",
-        help="Main output directory (default: 'outputs')",
+    parser.add_argument("--protocol", required=True, choices=["single_split", "oof"])
+    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--ensemble-config", default="configs/ensemble.yaml")
+    arguments = parser.parse_args()
+    run_ensemble_evaluation(
+        protocol=arguments.protocol,
+        results_root=arguments.results_root,
+        ensemble_config_path=arguments.ensemble_config,
     )
-    args = parser.parse_args()
-
-    run_ensemble_evaluation(mode=args.mode, outputs_dir=args.outputs_dir)
