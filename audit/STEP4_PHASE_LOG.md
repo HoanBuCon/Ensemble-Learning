@@ -373,3 +373,23 @@ New assumptions introduced: none.
 - nested CV
 - UI redesign
 - unrelated refactor
+
+## PHASE S — Final training status at session close
+
+Files changed: `audit/STEP4_TRAINING_PAUSE_STATE.md` and this phase log; generated
+DenseNet partial artifacts were preserved and were not staged.
+
+Behavior before: DenseNet-121 single-split training was active.
+
+Behavior after: the process is stopped. Epoch 9 is the last durable checkpoint boundary;
+epoch 10 briefly began in memory before the interrupt and left no checkpoint/history row.
+The user superseded resume intent and directed a fresh restart in the next session.
+
+Tests: process inspection confirmed no `scripts/train.py` process and no Python process
+associated with this workspace remains active.
+
+Scientific finding addressed: operational training cancellation and truthful partial-run
+provenance; no scientific result is asserted.
+
+New assumptions introduced: none. A fresh non-conflicting result identity/root remains a
+precondition for restarting without overwriting the preserved partial run.
