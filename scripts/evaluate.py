@@ -91,6 +91,8 @@ def evaluate(
         class_names=class_names,
         output_dir=config.checkpoint.save_dir,
         device=str(device),
+        split=split,
+        protocol="single_split",
     )
 
     print(f"\n{'='*50}")

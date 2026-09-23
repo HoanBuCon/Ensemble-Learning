@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -22,15 +22,12 @@ def count_parameters(model_name: str, num_classes: int = 6) -> int:
     """Count trainable parameters for a registered model."""
     import torch
 
-    try:
-        model = create_model(model_name, pretrained=False, num_classes=num_classes)
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return n_params
-    except Exception:
-        return 0
+    model = create_model(model_name, pretrained=False, num_classes=num_classes)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return n_params
 
 
 def get_model_size_mb(save_dir: str) -> float:
@@ -63,8 +60,12 @@ def extract_model_history_info(save_dir: str) -> Dict[str, Any]:
                 best_val = ckpt.get("best_value", 0.0)
                 if epoch > 0 and best_val > 0.0:
                     return {
-                        "best_epoch": int(epoch),
-                        "best_val_accuracy": float(best_val),
+                        "accepted_checkpoint_epoch": int(
+                            ckpt.get("best_epoch", epoch)
+                        ),
+                        "accepted_checkpoint_val_accuracy": float(
+                            ckpt.get("best_metric", best_val)
+                        ),
                     }
             except Exception:
                 pass
@@ -82,19 +83,21 @@ def extract_model_history_info(save_dir: str) -> Dict[str, Any]:
                 if val_accs:
                     best_idx = int(np.argmax(val_accs))
                     return {
-                        "best_epoch": best_idx + 1,
-                        "best_val_accuracy": float(val_accs[best_idx]),
+                        "accepted_checkpoint_epoch": None,
+                        "accepted_checkpoint_val_accuracy": None,
+                        "raw_max_val_accuracy": float(val_accs[best_idx]),
                     }
             except Exception:
                 pass
 
     return {
-        "best_epoch": 0,
-        "best_val_accuracy": 0.0,
+        "accepted_checkpoint_epoch": None,
+        "accepted_checkpoint_val_accuracy": None,
+        "raw_max_val_accuracy": None,
     }
 
 
-def extract_model_val_metrics(save_dir: str) -> Dict[str, float]:
+def extract_model_val_metrics(save_dir: str) -> Dict[str, Optional[float]]:
     """Compute full validation metrics (Acc, Precision, Recall, F1) from val_probabilities or OOF."""
     # 1. Single split val probabilities
     val_prob_path = os.path.join(save_dir, "val_probabilities.npy")
@@ -137,14 +140,12 @@ def extract_model_val_metrics(save_dir: str) -> Dict[str, float]:
         except Exception:
             pass
 
-    # 3. Fallback to best val accuracy in history
-    hist_info = extract_model_history_info(save_dir)
-    best_val = hist_info["best_val_accuracy"]
+    # Missing prediction evidence is reported as unavailable; no metric fabrication.
     return {
-        "Val_Accuracy": best_val,
-        "Val_Precision": best_val,
-        "Val_Recall": best_val,
-        "Val_F1_Score": best_val,
+        "Val_Accuracy": None,
+        "Val_Precision": None,
+        "Val_Recall": None,
+        "Val_F1_Score": None,
     }
 
 

@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from src.ensemble.artifacts import sample_ids_from_paths, save_prediction_artifact
 from src.utils.metrics import compute_metrics
 from src.utils.visualization import (
     plot_confusion_matrix,
@@ -43,7 +44,7 @@ def run_inference(
     model: nn.Module,
     dataloader: torch.utils.data.DataLoader,
     device: str = "cpu",
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], float]:
     """
     Run inference on a dataloader and collect all outputs.
 
@@ -53,13 +54,14 @@ def run_inference(
         device: Device string.
 
     Returns:
-        Tuple of ``(logits, probabilities, predictions, labels, inference_time_seconds)``.
+        Tuple of ``(logits, probabilities, predictions, labels, paths, time)``.
     """
     model.eval()
     model.to(device)
 
     all_logits: List[np.ndarray] = []
     all_labels: List[np.ndarray] = []
+    all_paths: List[str] = []
 
     start_time = time.time()
 
@@ -72,6 +74,9 @@ def run_inference(
 
             all_logits.append(logits.cpu().numpy())
             all_labels.append(labels.numpy())
+            if len(batch) < 3:
+                raise ValueError("Scientific inference requires source paths for sample identity")
+            all_paths.extend(str(path) for path in batch[2])
 
     inference_time = time.time() - start_time
 
@@ -84,7 +89,7 @@ def run_inference(
 
     predictions = np.argmax(probabilities, axis=1)
 
-    return logits, probabilities, predictions, labels, inference_time
+    return logits, probabilities, predictions, labels, all_paths, inference_time
 
 
 def save_predictions(
@@ -92,9 +97,11 @@ def save_predictions(
     probabilities: np.ndarray,
     predictions: np.ndarray,
     labels: np.ndarray,
+    paths: List[str],
     output_dir: str,
     class_to_idx: Optional[Dict[str, int]] = None,
     split: str = "test",
+    protocol: str = "single_split",
 ) -> None:
     """
     Save prediction arrays as ``.npy`` files for ensemble caching.
@@ -116,17 +123,27 @@ def save_predictions(
     np.save(os.path.join(output_dir, f"{prefix}predictions.npy"), predictions)
     np.save(os.path.join(output_dir, f"{prefix}labels.npy"), labels)
 
-    # For legacy backward compatibility
-    if split == "test":
-        np.save(os.path.join(output_dir, "logits.npy"), logits)
-        np.save(os.path.join(output_dir, "probabilities.npy"), probabilities)
-        np.save(os.path.join(output_dir, "predictions.npy"), predictions)
-        np.save(os.path.join(output_dir, "labels.npy"), labels)
-
     if class_to_idx is not None:
-        class_mapping_path = os.path.join(output_dir, "class_to_idx.json")
+        class_mapping_path = os.path.join(output_dir, f"{split}_class_to_idx.json")
         with open(class_mapping_path, "w", encoding="utf-8") as f:
             json.dump(class_to_idx, f, indent=2)
+        class_order = [
+            name for name, _ in sorted(class_to_idx.items(), key=lambda item: item[1])
+        ]
+    else:
+        class_order = [str(index) for index in range(probabilities.shape[1])]
+
+    save_prediction_artifact(
+        os.path.join(output_dir, f"{split}_predictions.npz"),
+        sample_ids=sample_ids_from_paths(paths),
+        y_true=labels,
+        probabilities=probabilities,
+        predictions=predictions,
+        class_order=class_order,
+        protocol=protocol,
+        method="base_model",
+        split=split,
+    )
 
 
 def evaluate_model(
@@ -136,6 +153,7 @@ def evaluate_model(
     output_dir: str,
     device: str = "cpu",
     split: str = "test",
+    protocol: str = "single_split",
 ) -> Dict[str, Any]:
     """
     Full evaluation pipeline: inference → metrics → reports → saved artifacts.
@@ -165,14 +183,14 @@ def evaluate_model(
     class_to_idx = getattr(dataset, "class_to_idx", None)
 
     # Run inference
-    logits, probabilities, predictions, labels, inference_time = run_inference(
+    logits, probabilities, predictions, labels, paths, inference_time = run_inference(
         model, dataloader, device
     )
 
     # Save prediction cache
     save_predictions(
-        logits, probabilities, predictions, labels, output_dir,
-        class_to_idx=class_to_idx, split=split,
+        logits, probabilities, predictions, labels, paths, output_dir,
+        class_to_idx=class_to_idx, split=split, protocol=protocol,
     )
 
     # Compute metrics
@@ -181,7 +199,7 @@ def evaluate_model(
     metrics["num_samples"] = len(labels)
 
     # Save metrics JSON
-    metrics_path = os.path.join(output_dir, "metrics.json")
+    metrics_path = os.path.join(output_dir, f"{split}_metrics.json")
     serializable = {
         k: v for k, v in metrics.items()
         if k != "classification_report"
@@ -190,7 +208,7 @@ def evaluate_model(
         json.dump(serializable, f, indent=2, default=str)
 
     # Save classification report text
-    report_path = os.path.join(output_dir, "classification_report.txt")
+    report_path = os.path.join(output_dir, f"{split}_classification_report.txt")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(metrics["classification_report"])
 
@@ -199,28 +217,28 @@ def evaluate_model(
     plot_confusion_matrix(
         cm, class_names, output_dir,
         title=f"Confusion Matrix ({split.title()} Split)",
-        normalize=False, filename="confusion_matrix.png",
+        normalize=False, filename=f"{split}_confusion_matrix.png",
     )
     plot_confusion_matrix(
         cm, class_names, output_dir,
         title=f"Normalized Confusion Matrix ({split.title()} Split)",
-        normalize=True, filename="confusion_matrix_normalized.png",
+        normalize=True, filename=f"{split}_confusion_matrix_normalized.png",
     )
 
     per_class = metrics.get("per_class", {})
     if per_class:
         plot_per_class_metrics(
             per_class, class_names, output_dir,
-            filename="per_class_metrics.png",
+            filename=f"{split}_per_class_metrics.png",
         )
 
     plot_roc_curves(
         labels, probabilities, class_names, output_dir,
-        filename="roc_curves.png",
+        filename=f"{split}_roc_curves.png",
     )
     plot_precision_recall_curves(
         labels, probabilities, class_names, output_dir,
-        filename="precision_recall_curves.png",
+        filename=f"{split}_precision_recall_curves.png",
     )
 
     return metrics

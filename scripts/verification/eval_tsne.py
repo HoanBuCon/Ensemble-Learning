@@ -1,271 +1,182 @@
-"""
-Latent Feature Space Quality & t-SNE 2D Manifold Visualizer
-==========================================================
-
-Generates 2D t-SNE projections comparing:
-1. Best Single Backbone (Swin-Tiny, 768-D Deep Penultimate Latent Space)
-2. Ensemble Multi-Model Concatenated Fusion Space (5120-D Deep Latent Embedding)
-
-Computes Quantitative Clustering Separation Metrics:
-- Silhouette Score ([-1, +1] - Higher is Better)
-- Davies-Bouldin Index (Lower is Better)
-- Calinski-Harabasz Index (Higher is Better)
-
-Usage:
-    python scripts/verification/eval_tsne.py
-    python scripts/verification/eval_tsne.py --save-dir outputs/verification
-"""
+"""t-SNE analysis with explicit, non-fallback feature semantics."""
 
 from __future__ import annotations
+
 import argparse
 import os
 import sys
-from typing import Optional
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from sklearn.manifold import TSNE
-from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.utils.config import load_dataset_config
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.manifold import TSNE
+from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
+from torch.utils.data import DataLoader
+
+from scripts.verification.common_utils import (
+    base_model_order,
+    load_protocol_predictions,
+    verification_output_dir,
+)
 from src.datasets.dataset import ImageFolderDataset
+from src.datasets.transforms import build_transforms
 from src.models.factory import create_model
-from scripts.verification.common_utils import resolve_outputs_dirs
+from src.utils.config import load_config
+from src.utils.provenance import write_json
 
 
-def extract_penultimate_features(
-    def_dir: str,
-    oof_dir: str,
-    test_dir: str,
+def feature_label(name: str, feature_source: str, matrix: np.ndarray) -> str:
+    """Build plot text only from the actual feature matrix metadata."""
+    return f"{name}: {feature_source} ({matrix.shape[1]}-D)"
+
+
+def _probability_features(
+    protocol: str,
+    results_root: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    base, _ = load_protocol_predictions(protocol, results_root=results_root)
+    order = list(base)
+    reference = base[order[0]]
+    single = base["swin_tiny"].probabilities
+    ensemble = np.concatenate([base[name].probabilities for name in order], axis=1)
+    return single, ensemble, reference.y_true, reference.class_order.tolist()
+
+
+def _penultimate_features(
+    results_root: str,
     device: torch.device,
-) -> tuple[dict[str, np.ndarray], np.ndarray, list[str]]:
-    """Extract deep penultimate embeddings for all backbones on the test set."""
-    val_transform = A.Compose([
-        A.Resize(height=224, width=224),
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ToTensorV2(),
-    ])
-
-    test_ds = ImageFolderDataset(root=test_dir, transform=val_transform)
-    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=0)
-    y_true = np.array([s[1] for s in test_ds.samples])
-    class_names = test_ds.classes
-
-    models = ["densenet121", "efficientnet_b0", "resnet50", "swin_tiny"]
-    all_features = {}
-
-    for m in models:
-        ckpt_path = None
-        candidates = [
-            os.path.join(def_dir, m, "best_model.pth"),
-            os.path.join(oof_dir, m, "kfold", "fold_1", "best_model.pth"),
-            os.path.join(oof_dir, m, "best_model.pth"),
-        ]
-        for c in candidates:
-            if os.path.exists(c):
-                ckpt_path = c
-                break
-
-        if not ckpt_path:
-            print(f"Warning: Checkpoint for {m} not found. Searching outputs/...")
-            continue
-
-        print(f"-> Extracting penultimate feature embeddings for {m} from '{ckpt_path}'...")
-        model = create_model(m, pretrained=False, num_classes=len(class_names))
-        state = torch.load(ckpt_path, map_location="cpu")
-        if "model_state_dict" in state:
-            model.load_state_dict(state["model_state_dict"])
-        elif "state_dict" in state:
-            model.load_state_dict(state["state_dict"])
-        else:
-            model.load_state_dict(state)
-
-        # Strip final classification head to expose deep latent representation
-        if m == "resnet50":
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    protocol = "single_split"
+    base, _ = load_protocol_predictions(protocol, results_root=results_root)
+    reference = next(iter(base.values()))
+    order = base_model_order()
+    config = load_config("configs/swin_tiny.yaml")
+    transform = build_transforms(
+        config.augmentation.test, image_size=config.data.image_size, stage="test"
+    )
+    dataset = ImageFolderDataset(root=os.path.join(config.data.root, "test"), transform=transform)
+    loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=0)
+    features: Dict[str, np.ndarray] = {}
+    for model_name in order:
+        checkpoint = Path(results_root) / protocol / model_name / "best_model.pth"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Deep-latent t-SNE requested but checkpoint is missing: {checkpoint}"
+            )
+        model = create_model(model_name, pretrained=False, num_classes=len(dataset.classes))
+        state = torch.load(checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(state["model_state_dict"])
+        if model_name == "resnet50":
             model.fc = nn.Identity()
-        elif m == "densenet121":
+        elif model_name == "densenet121":
             model.classifier = nn.Identity()
-        elif m in ["efficientnet_b0", "swin_tiny"]:
+        else:
             model.reset_classifier(0)
-
-        model.to(device)
-        model.eval()
-
-        feats_list = []
+        model.to(device).eval()
+        batches = []
         with torch.no_grad():
-            for imgs, _, _ in test_loader:
-                imgs = imgs.to(device)
-                feat = model(imgs)
-                feats_list.append(feat.cpu().numpy())
-
-        all_features[m] = np.vstack(feats_list)
-        print(f"   [Feature Extracted] {m} shape: {all_features[m].shape}")
-
-    return all_features, y_true, class_names
+            for images, _, _ in loader:
+                batches.append(model(images.to(device)).cpu().numpy())
+        features[model_name] = np.concatenate(batches, axis=0)
+    single = features["swin_tiny"]
+    ensemble = np.concatenate([features[name] for name in order], axis=1)
+    return single, ensemble, reference.y_true, reference.class_order.tolist()
 
 
 def run_tsne_analysis(
-    default_dir: Optional[str] = None,
-    oof_dir: Optional[str] = None,
-    save_dir: Optional[str] = "outputs/verification",
+    feature_source: str,
+    protocol: str = "oof",
+    results_root: str = "RESULTS/FINAL_V2",
+    save_dir: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Execute t-SNE projection on deep penultimate feature embeddings and compute cluster separation."""
-    def_dir, oof_dir = resolve_outputs_dirs(default_dir, oof_dir)
-    ds_raw = load_dataset_config()
-    test_dir = ds_raw.get("test_dir", os.path.join(PROJECT_ROOT, "data", "test"))
-
-    print("\n" + "=" * 90)
-    print("      t-SNE 2D DEEP LATENT FEATURE EMBEDDING & CLUSTER SEPARATION BENCHMARK")
-    print("=" * 90)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"-> Compute Device: {device} ({torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'})")
-
-    all_features, y_true, class_names = extract_penultimate_features(
-        def_dir=def_dir,
-        oof_dir=oof_dir,
-        test_dir=test_dir,
-        device=device,
-    )
-
-    models = ["densenet121", "efficientnet_b0", "resnet50", "swin_tiny"]
-    if "swin_tiny" in all_features and len(all_features) == 4:
-        swin_feats = all_features["swin_tiny"]  # (1546, 768)
-        ensemble_feats = np.hstack([all_features[m] for m in models])  # (1546, 5120)
-        swin_dim_label = "768-D Penultimate Latent Space"
-        ens_dim_label = "5120-D Concatenated Multi-Backbone Feature Space"
+    if feature_source == "probability_vector":
+        single, ensemble, y_true, class_order = _probability_features(protocol, results_root)
+    elif feature_source == "penultimate_embedding":
+        if protocol != "single_split":
+            raise ValueError(
+                "penultimate_embedding currently requires protocol=single_split; "
+                "no OOF fold checkpoint may be selected implicitly"
+            )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        single, ensemble, y_true, class_order = _penultimate_features(results_root, device)
     else:
-        # Fallback to probability vectors if checkpoints are unavailable
-        print("Fallback: Using cached probability matrices for t-SNE projection.")
-        oof_probs = [
-            np.load(os.path.join(oof_dir, m, "kfold", "test_probabilities.npy") if os.path.exists(os.path.join(oof_dir, m, "kfold", "test_probabilities.npy")) else os.path.join(oof_dir, m, "test_probabilities.npy")) 
-            for m in models
-        ]
-        swin_feats = oof_probs[3]
-        ensemble_feats = np.hstack(oof_probs)
-        swin_dim_label = "6-D Softmax Vector"
-        ens_dim_label = "24-D Meta-Probability Vector"
+        raise ValueError(
+            "feature_source must be 'probability_vector' or 'penultimate_embedding'"
+        )
 
-    # Compute t-SNE 2D Projections
-    print("-> Computing 2D t-SNE manifold projections (Perplexity=35, n_iter=1000)...")
-    tsne_swin_model = TSNE(n_components=2, perplexity=35, n_iter=1000, random_state=42)
-    tsne_swin = tsne_swin_model.fit_transform(swin_feats)
+    projections = []
+    rows = []
+    for name, matrix in (("swin_tiny", single), ("ensemble_concatenation", ensemble)):
+        projection = TSNE(
+            n_components=2,
+            perplexity=35,
+            max_iter=1000,
+            random_state=42,
+        ).fit_transform(matrix)
+        projections.append((name, projection, matrix.shape[1]))
+        rows.append({
+            "representation": name,
+            "feature_source": feature_source,
+            "feature_dimension": int(matrix.shape[1]),
+            "silhouette_score": float(silhouette_score(matrix, y_true)),
+            "davies_bouldin_index": float(davies_bouldin_score(matrix, y_true)),
+            "calinski_harabasz_index": float(calinski_harabasz_score(matrix, y_true)),
+        })
 
-    tsne_ens_model = TSNE(n_components=2, perplexity=35, n_iter=1000, random_state=42)
-    tsne_ensemble = tsne_ens_model.fit_transform(ensemble_feats)
-
-    # Compute Quantitative Clustering Metrics
-    print("-> Computing quantitative cluster separation metrics...")
-    sil_swin = float(silhouette_score(swin_feats, y_true))
-    db_swin = float(davies_bouldin_score(swin_feats, y_true))
-    ch_swin = float(calinski_harabasz_score(swin_feats, y_true))
-
-    sil_ens = float(silhouette_score(ensemble_feats, y_true))
-    db_ens = float(davies_bouldin_score(ensemble_feats, y_true))
-    ch_ens = float(calinski_harabasz_score(ensemble_feats, y_true))
-
-    metrics_rows = [
-        {
-            "Representation Space": "Single Backbone (Swin-Tiny)",
-            "Dimension": swin_dim_label,
-            "Silhouette Score": f"{sil_swin:.4f}",
-            "Davies-Bouldin Index": f"{db_swin:.4f}",
-            "Calinski-Harabasz": f"{ch_swin:.1f}",
-        },
-        {
-            "Representation Space": "Ensemble Fusion (4 Multi-Scale Backbones)",
-            "Dimension": ens_dim_label,
-            "Silhouette Score": f"{sil_ens:.4f}",
-            "Davies-Bouldin Index": f"{db_ens:.4f}",
-            "Calinski-Harabasz": f"{ch_ens:.1f}",
-        }
-    ]
-    df_metrics = pd.DataFrame(metrics_rows)
-    print("\n" + df_metrics.to_string(index=False))
-    print("-" * 90)
-
-    # Plot 2D Comparison Figure
+    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output.mkdir(parents=True, exist_ok=True)
+    figure, axes = plt.subplots(1, 2, figsize=(18, 7.5))
     palette = ["#ef4444", "#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#06b6d4"]
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7.5))
+    for axis, (name, projection, dimension) in zip(axes, projections):
+        for class_index, class_name in enumerate(class_order):
+            mask = y_true == class_index
+            axis.scatter(
+                projection[mask, 0], projection[mask, 1],
+                color=palette[class_index], label=class_name, alpha=0.75, s=26,
+            )
+        matrix = single if name == "swin_tiny" else ensemble
+        axis.set_title(feature_label(name, feature_source, matrix))
+        axis.set_xlabel("t-SNE dimension 1")
+        axis.set_ylabel("t-SNE dimension 2")
+        axis.legend(fontsize=8)
+    figure.tight_layout()
+    plot_path = output / f"tsne_{protocol}_{feature_source}.png"
+    figure.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
 
-    # Subplot 1: Single Model
-    for c_idx, c_name in enumerate(class_names):
-        mask = (y_true == c_idx)
-        axes[0].scatter(
-            tsne_swin[mask, 0],
-            tsne_swin[mask, 1],
-            c=palette[c_idx],
-            label=f"{c_name}",
-            alpha=0.75,
-            s=28,
-            edgecolors="none",
-        )
-    axes[0].set_title(
-        f"(a) Single Backbone Deep Latent Space (Swin-Tiny, {swin_dim_label})\nSilhouette: {sil_swin:.4f} | Davies-Bouldin: {db_swin:.4f}",
-        fontsize=11.5,
-        fontweight="bold",
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output / f"tsne_{protocol}_{feature_source}_metrics.csv", index=False)
+    write_json(
+        output / f"tsne_{protocol}_{feature_source}_metadata.json",
+        {
+            "protocol": protocol,
+            "feature_source": feature_source,
+            "representations": rows,
+            "plot": str(plot_path),
+        },
     )
-    axes[0].set_xlabel("t-SNE Dimension 1", fontsize=10)
-    axes[0].set_ylabel("t-SNE Dimension 2", fontsize=10)
-    axes[0].grid(True, linestyle="--", alpha=0.3)
-    axes[0].legend(loc="best", fontsize=8.5, framealpha=0.85)
-
-    # Subplot 2: Ensemble Fusion Space
-    for c_idx, c_name in enumerate(class_names):
-        mask = (y_true == c_idx)
-        axes[1].scatter(
-            tsne_ensemble[mask, 0],
-            tsne_ensemble[mask, 1],
-            c=palette[c_idx],
-            label=f"{c_name}",
-            alpha=0.8,
-            s=32,
-            edgecolors="none",
-        )
-    axes[1].set_title(
-        f"(b) Ensemble Multi-Backbone Concatenated Space (5120-D Deep Latent)\nSilhouette: {sil_ens:.4f} | Davies-Bouldin: {db_ens:.4f}",
-        fontsize=11.5,
-        fontweight="bold",
-        color="#10b981",
-    )
-    axes[1].set_xlabel("t-SNE Dimension 1", fontsize=10)
-    axes[1].set_ylabel("t-SNE Dimension 2", fontsize=10)
-    axes[1].grid(True, linestyle="--", alpha=0.3)
-    axes[1].legend(loc="best", fontsize=8.5, framealpha=0.85)
-
-    plt.tight_layout()
-    os.makedirs(save_dir, exist_ok=True)
-    out_plot = os.path.join(save_dir, "tsne_latent_space.png")
-    out_svg = os.path.join(save_dir, "tsne_latent_space.svg")
-    plt.savefig(out_svg, format="svg", bbox_inches="tight")
-    plt.savefig(out_plot, format="png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    csv_p = os.path.join(save_dir, "tsne_clustering_metrics.csv")
-    md_p = os.path.join(save_dir, "tsne_clustering_metrics.md")
-    df_metrics.to_csv(csv_p, index=False)
-    with open(md_p, "w", encoding="utf-8") as f:
-        f.write("# Latent Feature Space Clustering Benchmark (t-SNE Quality)\n\n")
-        f.write(df_metrics.to_markdown(index=False))
-        f.write("\n\n![t-SNE 2D Feature Space](tsne_latent_space.png)\n")
-
-    print(f"[t-SNE Plot Saved] -> '{out_svg}' and '{out_plot}'")
-    print(f"[Metrics Saved]    -> '{csv_p}' and '{md_p}'")
-    print("=" * 90)
-    return df_metrics
+    return frame
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="t-SNE Feature Space Analysis")
-    parser.add_argument("--save-dir", default="outputs/verification", help="Directory to save output reports")
+    parser = argparse.ArgumentParser(description="Explicit-source t-SNE analysis")
+    parser.add_argument(
+        "--feature-source",
+        required=True,
+        choices=["probability_vector", "penultimate_embedding"],
+    )
+    parser.add_argument("--protocol", choices=["single_split", "oof"], default="oof")
+    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--save-dir", default=None)
     args = parser.parse_args()
-    run_tsne_analysis(save_dir=args.save_dir)
+    run_tsne_analysis(
+        args.feature_source, args.protocol, args.results_root, args.save_dir
+    )

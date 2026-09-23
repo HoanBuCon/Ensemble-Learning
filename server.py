@@ -59,7 +59,7 @@ DEFAULT_CLASS_NAMES = DATASET_CONFIG.get("classes", [
     "Tea_algal_leaf_spot",
 ])
 
-BASE_MODEL_KEYS = ["resnet50", "densenet121", "efficientnet_b0", "swin_tiny"]
+BASE_MODEL_KEYS = ["densenet121", "efficientnet_b0", "resnet50", "swin_tiny"]
 ENSEMBLE_KEYS = [
     "hard_voting",
     "soft_voting",
@@ -210,61 +210,38 @@ def load_all_base_models():
     print(f"   SCANNING & LOADING BASE MODELS: DUAL PROTOCOL (Device: {DEVICE})")
     print(f"{'='*75}")
 
-    # 1. Scan and Load Single-Split Models
-    single_search_dirs = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING"),
-        os.path.join(PROJECT_ROOT, "Default_Result_V2", "outputs"),
-        os.path.join(PROJECT_ROOT, "Default_Results", "outputs"),
-        os.path.join(PROJECT_ROOT, "outputs"),
-    ]
-    print("--> Scanning Single-Split Checkpoints (Protocol: Single-Split)...")
-    for name in BASE_MODEL_KEYS:
-        weights_path, cmap_path, info_str = find_single_model_checkpoint(name, single_search_dirs)
-        if weights_path and os.path.exists(weights_path):
-            update_class_names_from_cmap(cmap_path)
-            try:
+    single_root = os.path.join(PROJECT_ROOT, "RESULTS", "FINAL_V2", "single_split")
+    if os.path.isdir(single_root):
+        for name in BASE_MODEL_KEYS:
+            weights_path = os.path.join(single_root, name, "best_model.pth")
+            if not os.path.isfile(weights_path):
+                raise FileNotFoundError(f"Incomplete FINAL_V2 single-split models: {weights_path}")
+            model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
+            checkpoint = torch.load(weights_path, map_location=DEVICE, weights_only=False)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.to(DEVICE).eval()
+            BASE_MODELS_SINGLE[name] = model
+            LOADED_MODEL_INFO["single"][name] = "FINAL_V2 single_split"
+
+    oof_root = os.path.join(PROJECT_ROOT, "RESULTS", "FINAL_V2", "oof")
+    if os.path.isdir(oof_root):
+        for name in BASE_MODEL_KEYS:
+            fold_paths = [
+                os.path.join(oof_root, name, "kfold", f"fold_{index}", "best_model.pth")
+                for index in range(1, 6)
+            ]
+            missing = [path for path in fold_paths if not os.path.isfile(path)]
+            if missing:
+                raise FileNotFoundError(f"Incomplete FINAL_V2 OOF models: {missing}")
+            fold_models = []
+            for path in fold_paths:
                 model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
-                checkpoint = torch.load(weights_path, map_location=DEVICE, weights_only=False)
-                state_dict = checkpoint.get("model_state_dict", checkpoint)
-                model.load_state_dict(state_dict)
-                model.to(DEVICE)
-                model.eval()
-
-                BASE_MODELS_SINGLE[name] = model
-                LOADED_MODEL_INFO["single"][name] = info_str or "Single Split"
-                print(f"  [+] Single: {BASE_DISPLAY_NAMES.get(name, name):<22} -> {weights_path}")
-            except Exception as e:
-                print(f"  [X] Failed to load Single {name}: {e}")
-
-    # 2. Scan and Load 5-Fold OOF Models
-    oof_search_dirs = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING"),
-        os.path.join(PROJECT_ROOT, "OOF_Results", "outputs"),
-        os.path.join(PROJECT_ROOT, "outputs"),
-    ]
-    print("\n--> Scanning 5-Fold OOF Checkpoints (Protocol: 5-Fold OOF)...")
-    for name in BASE_MODEL_KEYS:
-        fold_pths, cmap_path = find_oof_fold_checkpoints(name, oof_search_dirs)
-        if fold_pths:
-            update_class_names_from_cmap(cmap_path)
-            try:
-                fold_models = []
-                for fp in fold_pths:
-                    model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
-                    checkpoint = torch.load(fp, map_location=DEVICE, weights_only=False)
-                    state_dict = checkpoint.get("model_state_dict", checkpoint)
-                    model.load_state_dict(state_dict)
-                    model.to(DEVICE)
-                    model.eval()
-                    fold_models.append(model)
-
-                BASE_MODELS_OOF[name] = fold_models
-                LOADED_MODEL_INFO["oof"][name] = f"5-Fold Averaging ({len(fold_models)} Folds)"
-                print(f"  [+] 5-Fold: {BASE_DISPLAY_NAMES.get(name, name):<22} -> {len(fold_models)} Fold Checkpoints Loaded")
-            except Exception as e:
-                print(f"  [X] Failed to load 5-Fold {name}: {e}")
+                checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
+                model.load_state_dict(checkpoint["model_state_dict"])
+                model.to(DEVICE).eval()
+                fold_models.append(model)
+            BASE_MODELS_OOF[name] = fold_models
+            LOADED_MODEL_INFO["oof"][name] = "FINAL_V2 five-fold mean"
 
     # Set default BASE_MODELS pointer to OOF if available (for 5-fold averaging), else Single
     BASE_MODELS.clear()
@@ -278,142 +255,57 @@ def load_all_base_models():
 
 
 def init_ensemble_models():
-    """Fit and cache ensemble models for both Single-Split and 5-Fold OOF protocols."""
+    """Load canonical fitted FINAL_V2 ensembles; never refit in the server."""
     global ENSEMBLE_MODELS_SINGLE, ENSEMBLE_MODELS_OOF, ENSEMBLE_MODELS
     ENSEMBLE_MODELS_SINGLE.clear()
     ENSEMBLE_MODELS_OOF.clear()
 
-    # 1. Fit Single-Split Ensemble Models (on ~1,540 Val Samples)
-    single_search_dirs = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING"),
-        os.path.join(PROJECT_ROOT, "Default_Result_V2", "outputs"),
-        os.path.join(PROJECT_ROOT, "outputs"),
-    ]
-    fit_single_probs = []
-    fit_single_labels = None
-    for m in BASE_MODEL_KEYS:
-        found_p, found_l = None, None
-        for s_dir in single_search_dirs:
-            p_cand = os.path.join(s_dir, m, "val_probabilities.npy")
-            l_cand = os.path.join(s_dir, m, "val_labels.npy")
-            if os.path.exists(p_cand) and os.path.exists(l_cand):
-                found_p = np.load(p_cand)
-                found_l = np.load(l_cand)
-                break
-        if found_p is not None and found_l is not None:
-            fit_single_probs.append(found_p)
-            if fit_single_labels is None:
-                fit_single_labels = found_l
+    def load_protocol(protocol: str) -> Dict[str, Any]:
+        artifact_dir = os.path.join(
+            PROJECT_ROOT, "RESULTS", "FINAL_V2", protocol,
+            "ensembles", "ensemble_artifacts",
+        )
+        if not os.path.isdir(artifact_dir):
+            return {}
+        required = {
+            "weighted_voting": "weighted_voting.json",
+            "stacking_logistic": "stacking_lr.joblib",
+            "stacking_rf": "stacking_rf.joblib",
+            "stacking_xgb": "stacking_xgb.json",
+        }
+        missing = [
+            filename for filename in required.values()
+            if not os.path.isfile(os.path.join(artifact_dir, filename))
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"Incomplete {protocol} ensemble artifacts: {missing}"
+            )
+        return {
+            "hard_voting": HardVoting(),
+            "soft_voting": SoftVoting(),
+            "weighted_voting": WeightedVoting.load(
+                os.path.join(artifact_dir, required["weighted_voting"])
+            ),
+            "stacking_logistic": StackingEnsemble("logistic_regression").load(
+                os.path.join(artifact_dir, required["stacking_logistic"])
+            ),
+            "stacking_rf": StackingEnsemble("random_forest").load(
+                os.path.join(artifact_dir, required["stacking_rf"])
+            ),
+            "stacking_xgb": StackingEnsemble("xgboost").load(
+                os.path.join(artifact_dir, required["stacking_xgb"])
+            ),
+        }
 
-    if len(fit_single_probs) == 4 and fit_single_labels is not None:
-        print(f"--> Initializing Single-Split Ensemble Models on {len(fit_single_labels)} Validation Samples...")
-        ENSEMBLE_MODELS_SINGLE["hard_voting"] = HardVoting()
-        ENSEMBLE_MODELS_SINGLE["soft_voting"] = SoftVoting()
-
-        opt_w = [0.44, 0.06, 0.06, 0.44]  # Default optimal weights for single
-        for s_dir in single_search_dirs:
-            comp_csv = os.path.join(s_dir, "val", "ensemble_comparison.csv")
-            if os.path.exists(comp_csv):
-                try:
-                    import pandas as pd
-                    df = pd.read_csv(comp_csv)
-                    for _, row in df.iterrows():
-                        if "Weighted Voting" in str(row.get("Method", "")):
-                            details = str(row.get("Details", ""))
-                            parsed = [float(re.search(rf"{m}:\s*([\d\.]+)", details).group(1)) for m in BASE_MODEL_KEYS if re.search(rf"{m}:\s*([\d\.]+)", details)]
-                            if len(parsed) == 4:
-                                opt_w = parsed
-                            break
-                except Exception:
-                    pass
-        ENSEMBLE_MODELS_SINGLE["weighted_voting"] = WeightedVoting(weights=opt_w)
-        print(f"  [Single Weighted Voting] Weights: {opt_w}")
-
-        st_lr = StackingEnsemble(meta_learner="logistic_regression")
-        st_lr.fit(fit_single_probs, fit_single_labels)
-        ENSEMBLE_MODELS_SINGLE["stacking_logistic"] = st_lr
-
-        st_rf = StackingEnsemble(meta_learner="random_forest")
-        st_rf.fit(fit_single_probs, fit_single_labels)
-        ENSEMBLE_MODELS_SINGLE["stacking_rf"] = st_rf
-
-        try:
-            st_xgb = StackingEnsemble(meta_learner="xgboost")
-            st_xgb.fit(fit_single_probs, fit_single_labels)
-            ENSEMBLE_MODELS_SINGLE["stacking_xgb"] = st_xgb
-        except Exception:
-            pass
-        print(f"  [Single Ensemble] Ready: {list(ENSEMBLE_MODELS_SINGLE.keys())}")
-
-    # 2. Fit 5-Fold OOF Ensemble Models (on 7,192 OOF Samples)
-    oof_search_dirs = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING"),
-        os.path.join(PROJECT_ROOT, "OOF_Results", "outputs"),
-        os.path.join(PROJECT_ROOT, "outputs"),
-    ]
-    fit_oof_probs = []
-    fit_oof_labels = None
-    for m in BASE_MODEL_KEYS:
-        found_p, found_l = None, None
-        for o_dir in oof_search_dirs:
-            p_cand = os.path.join(o_dir, m, "kfold", "oof_probabilities.npy")
-            l_cand = os.path.join(o_dir, m, "kfold", "oof_labels.npy")
-            if os.path.exists(p_cand) and os.path.exists(l_cand):
-                found_p = np.load(p_cand)
-                found_l = np.load(l_cand)
-                break
-        if found_p is not None and found_l is not None:
-            fit_oof_probs.append(found_p)
-            if fit_oof_labels is None:
-                fit_oof_labels = found_l
-
-    if len(fit_oof_probs) == 4 and fit_oof_labels is not None:
-        print(f"\n--> Initializing 5-Fold OOF Ensemble Models on {len(fit_oof_labels)} Out-of-Fold Samples...")
-        ENSEMBLE_MODELS_OOF["hard_voting"] = HardVoting()
-        ENSEMBLE_MODELS_OOF["soft_voting"] = SoftVoting()
-
-        opt_w_oof = [0.44, 0.06, 0.06, 0.44]
-        for o_dir in oof_search_dirs:
-            comp_csv = os.path.join(o_dir, "oof", "ensemble_comparison.csv")
-            if os.path.exists(comp_csv):
-                try:
-                    import pandas as pd
-                    df = pd.read_csv(comp_csv)
-                    for _, row in df.iterrows():
-                        if "Weighted Voting" in str(row.get("Method", "")):
-                            details = str(row.get("Details", ""))
-                            parsed = [float(re.search(rf"{m}:\s*([\d\.]+)", details).group(1)) for m in BASE_MODEL_KEYS if re.search(rf"{m}:\s*([\d\.]+)", details)]
-                            if len(parsed) == 4:
-                                opt_w_oof = parsed
-                            break
-                except Exception:
-                    pass
-        ENSEMBLE_MODELS_OOF["weighted_voting"] = WeightedVoting(weights=opt_w_oof)
-        print(f"  [5-Fold OOF Weighted Voting] Weights: {opt_w_oof}")
-
-        st_lr_oof = StackingEnsemble(meta_learner="logistic_regression")
-        st_lr_oof.fit(fit_oof_probs, fit_oof_labels)
-        ENSEMBLE_MODELS_OOF["stacking_logistic"] = st_lr_oof
-
-        st_rf_oof = StackingEnsemble(meta_learner="random_forest")
-        st_rf_oof.fit(fit_oof_probs, fit_oof_labels)
-        ENSEMBLE_MODELS_OOF["stacking_rf"] = st_rf_oof
-
-        try:
-            st_xgb_oof = StackingEnsemble(meta_learner="xgboost")
-            st_xgb_oof.fit(fit_oof_probs, fit_oof_labels)
-            ENSEMBLE_MODELS_OOF["stacking_xgb"] = st_xgb_oof
-        except Exception:
-            pass
-        print(f"  [5-Fold OOF Ensemble] Ready: {list(ENSEMBLE_MODELS_OOF.keys())}\n")
+    ENSEMBLE_MODELS_SINGLE.update(load_protocol("single_split"))
+    ENSEMBLE_MODELS_OOF.update(load_protocol("oof"))
 
     # Set default pointer
     ENSEMBLE_MODELS.clear()
     if ENSEMBLE_MODELS_OOF:
         ENSEMBLE_MODELS.update(ENSEMBLE_MODELS_OOF)
-    else:
+    elif ENSEMBLE_MODELS_SINGLE:
         ENSEMBLE_MODELS.update(ENSEMBLE_MODELS_SINGLE)
 
 
@@ -444,25 +336,19 @@ def compute_base_probabilities(batch_tensor: torch.Tensor, protocol: str = "oof"
     with torch.no_grad():
         if protocol in ["oof", "5fold"] and BASE_MODELS_OOF:
             for name in BASE_MODEL_KEYS:
-                if name in BASE_MODELS_OOF:
-                    fold_models = BASE_MODELS_OOF[name]
-                    # Compute mean softmax probabilities across all 5 folds
-                    probs_stacked = [torch.softmax(f_m(batch_tensor), dim=1) for f_m in fold_models]
-                    mean_probs = torch.mean(torch.stack(probs_stacked), dim=0).cpu().numpy()
-                    base_probs[name] = mean_probs
-                elif name in BASE_MODELS_SINGLE:
-                    logits = BASE_MODELS_SINGLE[name](batch_tensor)
-                    base_probs[name] = torch.softmax(logits, dim=1).cpu().numpy()
+                if name not in BASE_MODELS_OOF:
+                    raise RuntimeError(f"Missing OOF base model family: {name}")
+                fold_models = BASE_MODELS_OOF[name]
+                probs_stacked = [torch.softmax(f_m(batch_tensor), dim=1) for f_m in fold_models]
+                mean_probs = torch.mean(torch.stack(probs_stacked), dim=0).cpu().numpy()
+                base_probs[name] = mean_probs
         else:
             # Single-Split Protocol
             for name in BASE_MODEL_KEYS:
-                if name in BASE_MODELS_SINGLE:
-                    logits = BASE_MODELS_SINGLE[name](batch_tensor)
-                    base_probs[name] = torch.softmax(logits, dim=1).cpu().numpy()
-                elif name in BASE_MODELS_OOF:
-                    # Fallback to fold_1 if single model not loaded
-                    logits = BASE_MODELS_OOF[name][0](batch_tensor)
-                    base_probs[name] = torch.softmax(logits, dim=1).cpu().numpy()
+                if name not in BASE_MODELS_SINGLE:
+                    raise RuntimeError(f"Missing single-split base model: {name}")
+                logits = BASE_MODELS_SINGLE[name](batch_tensor)
+                base_probs[name] = torch.softmax(logits, dim=1).cpu().numpy()
 
     return base_probs
 
@@ -473,21 +359,29 @@ def compute_ensemble_predictions(
     """
     Compute ensemble predictions for a specific ensemble method under the selected protocol.
     """
-    target_ensembles = ENSEMBLE_MODELS_OOF if (protocol in ["oof", "5fold"] and ENSEMBLE_MODELS_OOF) else ENSEMBLE_MODELS_SINGLE
+    target_ensembles = (
+        ENSEMBLE_MODELS_OOF if protocol in ["oof", "5fold"]
+        else ENSEMBLE_MODELS_SINGLE
+    )
     if not target_ensembles:
-        target_ensembles = ENSEMBLE_MODELS
+        raise RuntimeError(f"Canonical fitted ensemble artifacts are unavailable for {protocol}")
 
-    probs_list = [base_probs_map[m] for m in BASE_MODEL_KEYS if m in base_probs_map]
-    if not probs_list:
-        raise ValueError("No base model probabilities available to compute ensemble.")
+    missing_base = [name for name in BASE_MODEL_KEYS if name not in base_probs_map]
+    if missing_base:
+        raise ValueError(f"Missing base probabilities: {missing_base}")
+    probs_list = [base_probs_map[m] for m in BASE_MODEL_KEYS]
 
     if ensemble_key == "hard_voting":
-        hv = target_ensembles.get("hard_voting", HardVoting())
+        hv = target_ensembles.get("hard_voting")
+        if hv is None:
+            raise RuntimeError("Hard Voting artifact identity is unavailable")
         preds = hv.predict(probs_list)
         return preds, None
 
     elif ensemble_key == "soft_voting":
-        sv = target_ensembles.get("soft_voting", SoftVoting())
+        sv = target_ensembles.get("soft_voting")
+        if sv is None:
+            raise RuntimeError("Soft Voting artifact identity is unavailable")
         probs = sv.predict_proba(probs_list)
         preds = np.argmax(probs, axis=1)
         return preds, probs
@@ -498,10 +392,7 @@ def compute_ensemble_predictions(
             probs = wv.predict_proba(probs_list)
             preds = np.argmax(probs, axis=1)
             return preds, probs
-        else:
-            sv = SoftVoting()
-            probs = sv.predict_proba(probs_list)
-            return np.argmax(probs, axis=1), probs
+        raise RuntimeError("Weighted Voting artifact is missing")
 
     elif ensemble_key in ["stacking_logistic", "stacking_rf", "stacking_xgb"]:
         st = target_ensembles.get(ensemble_key)
@@ -509,10 +400,7 @@ def compute_ensemble_predictions(
             probs = st.predict_proba(probs_list)
             preds = np.argmax(probs, axis=1)
             return preds, probs
-        else:
-            sv = SoftVoting()
-            probs = sv.predict_proba(probs_list)
-            return np.argmax(probs, axis=1), probs
+        raise RuntimeError(f"Stacking artifact is missing: {ensemble_key}")
 
     raise ValueError(f"Unknown ensemble key: {ensemble_key}")
 

@@ -1,211 +1,304 @@
-"""
-Hardware Efficiency, Inference Latency and Throughput Benchmark
-===============================================================
-
-Measures:
-1. GPU Latency (ms/image) using CUDA Synchronized Events
-2. GPU Throughput (FPS - Frames Per Second)
-3. CPU Latency (ms/image) using high-precision perf_counter
-4. CPU Throughput (FPS)
-5. Parameter Count (Millions) and Model Storage Footprint (MB)
-
-Evaluated architectures:
-- 4 Base Models: ResNet-50, DenseNet-121, EfficientNet-B0, Swin Transformer Tiny
-- 2 Top Ensembles: Soft Voting Ensemble (4 models) & Stacking Meta-Learner (Random Forest)
-
-Usage:
-    python scripts/verification/eval_latency_throughput.py
-    python scripts/verification/eval_latency_throughput.py --save-dir outputs/verification
-"""
+"""Benchmark real FINAL_V2 checkpoint and fitted-ensemble pipelines."""
 
 from __future__ import annotations
+
 import argparse
 import os
 import sys
 import time
-from typing import Optional, Dict, Any, List
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import numpy as np
+import pandas as pd
+import torch
+import yaml
+
+from scripts.verification.common_utils import base_model_order, verification_output_dir
+from src.ensemble.stacking import StackingEnsemble
+from src.ensemble.voting import WeightedVoting
 from src.models.factory import create_model
+from src.utils.config import load_config
+from src.utils.provenance import runtime_identity, write_json
 
 
-def benchmark_model_latency(
-    model: nn.Module,
+class FoldAveragedModel(torch.nn.Module):
+    """Execute every saved fold model and average its probabilities."""
+
+    def __init__(self, models: Sequence[torch.nn.Module]) -> None:
+        super().__init__()
+        self.models = torch.nn.ModuleList(models)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        probabilities = [torch.softmax(model(inputs), dim=1) for model in self.models]
+        return torch.stack(probabilities, dim=0).mean(dim=0)
+
+
+def _checkpoint_paths(results_root: str, protocol: str, model_name: str) -> List[Path]:
+    root = Path(results_root) / protocol / model_name
+    if protocol == "single_split":
+        paths = [root / "best_model.pth"]
+    elif protocol == "oof":
+        paths = [root / "kfold" / f"fold_{index}" / "best_model.pth" for index in range(1, 6)]
+    else:
+        raise ValueError("protocol must be single_split or oof")
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Final checkpoint(s) missing: {missing}")
+    return paths
+
+
+def _load_family(
+    results_root: str,
+    protocol: str,
+    model_name: str,
     device: torch.device,
-    input_shape: tuple = (1, 3, 224, 224),
-    warmup_runs: int = 25,
-    test_runs: int = 100,
-) -> tuple[float, float]:
-    """Measure mean inference latency (ms) and throughput (FPS) on given device."""
-    model.eval()
-    model.to(device)
-    dummy_input = torch.randn(*input_shape, device=device)
+) -> Tuple[FoldAveragedModel, List[Path]]:
+    config = load_config(f"configs/{model_name}.yaml")
+    paths = _checkpoint_paths(results_root, protocol, model_name)
+    models = []
+    for path in paths:
+        model = create_model(
+            model_name,
+            pretrained=False,
+            num_classes=config.model.num_classes,
+            drop_rate=config.model.drop_rate,
+        )
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(device).eval()
+        models.append(model)
+    return FoldAveragedModel(models).to(device).eval(), paths
 
-    # Warmup
+
+def _benchmark_callable(
+    operation: Callable[[], object],
+    device: torch.device,
+    warmup: int,
+    iterations: int,
+    repeats: int,
+) -> Dict[str, object]:
     with torch.no_grad():
-        for _ in range(warmup_runs):
-            _ = model(dummy_input)
-
+        for _ in range(warmup):
+            operation()
     if device.type == "cuda":
-        torch.cuda.synchronize()
-        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(test_runs)]
-        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(test_runs)]
+        torch.cuda.synchronize(device)
 
-        with torch.no_grad():
-            for i in range(test_runs):
-                start_events[i].record()
-                _ = model(dummy_input)
-                end_events[i].record()
-        torch.cuda.synchronize()
+    repeat_wall: List[float] = []
+    repeat_cuda: List[float] = []
+    with torch.no_grad():
+        for _ in range(repeats):
+            wall_times = []
+            cuda_times = []
+            for _ in range(iterations):
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                started = time.perf_counter()
+                operation()
+                if device.type == "cuda":
+                    end_event.record()
+                    torch.cuda.synchronize(device)
+                    cuda_times.append(float(start_event.elapsed_time(end_event)))
+                wall_times.append((time.perf_counter() - started) * 1000.0)
+            repeat_wall.append(float(np.mean(wall_times)))
+            if cuda_times:
+                repeat_cuda.append(float(np.mean(cuda_times)))
+    mean_wall = float(np.mean(repeat_wall))
+    return {
+        "latency_ms": mean_wall,
+        "throughput_per_second": 1000.0 / mean_wall,
+        "repeat_latency_ms": repeat_wall,
+        "cuda_event_latency_ms": (
+            float(np.mean(repeat_cuda)) if repeat_cuda else None
+        ),
+        "cuda_event_repeat_latency_ms": repeat_cuda,
+    }
 
-        times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]  # in ms
-        mean_latency_ms = float(np.mean(times))
-        fps = float(1000.0 / mean_latency_ms) if mean_latency_ms > 0 else 0.0
-        return mean_latency_ms, fps
-    else:
-        times = []
-        with torch.no_grad():
-            for _ in range(test_runs):
-                t0 = time.perf_counter()
-                _ = model(dummy_input)
-                t1 = time.perf_counter()
-                times.append((t1 - t0) * 1000.0)  # ms
-        mean_latency_ms = float(np.mean(times))
-        fps = float(1000.0 / mean_latency_ms) if mean_latency_ms > 0 else 0.0
-        return mean_latency_ms, fps
+
+def _ensemble_operation(
+    method: str,
+    families: Dict[str, FoldAveragedModel],
+    model_order: Sequence[str],
+    dummy_input: torch.Tensor,
+    artifact_dir: Path,
+) -> Callable[[], object]:
+    weighted = None
+    stacker = None
+    if method == "weighted_voting":
+        weighted = WeightedVoting.load(str(artifact_dir / "weighted_voting.json"))
+        weights = torch.tensor(weighted.weights, device=dummy_input.device, dtype=dummy_input.dtype)
+    elif method.startswith("stacking_"):
+        learner_map = {
+            "stacking_logistic_regression": ("logistic_regression", "stacking_lr.joblib"),
+            "stacking_random_forest": ("random_forest", "stacking_rf.joblib"),
+            "stacking_xgboost": ("xgboost", "stacking_xgb.json"),
+        }
+        learner, filename = learner_map[method]
+        stacker = StackingEnsemble(learner).load(str(artifact_dir / filename))
+
+    def operation() -> object:
+        probabilities = [families[name](dummy_input) for name in model_order]
+        stacked = torch.stack(probabilities, dim=0)
+        if method == "soft_voting":
+            return stacked.mean(dim=0)
+        if method == "hard_voting":
+            predictions = torch.argmax(stacked, dim=2)
+            return torch.stack(
+                [(predictions == index).float().mean(dim=0) for index in range(stacked.shape[2])],
+                dim=1,
+            )
+        if method == "weighted_voting":
+            return torch.sum(stacked * weights[:, None, None], dim=0)
+        features = torch.cat(probabilities, dim=1).detach().cpu().numpy()
+        return stacker._model.predict_proba(features)
+
+    return operation
 
 
-def run_hardware_benchmark(save_dir: Optional[str] = "outputs/verification") -> pd.DataFrame:
-    """Execute complete hardware efficiency, latency & throughput benchmark."""
-    print("\n" + "=" * 100)
-    print("      HARDWARE EFFICIENCY & INFERENCE LATENCY BENCHMARK (CPU vs. GPU)")
-    print("=" * 100)
-
-    has_cuda = torch.cuda.is_available()
-    gpu_name = torch.cuda.get_device_name(0) if has_cuda else "N/A"
-    print(f"-> Host GPU: {gpu_name} (CUDA Available: {has_cuda})")
-    print(f"-> Host CPU: {os.cpu_count()} Threads Available")
-
-    models_info = [
-        ("resnet50", "ResNet-50 Baseline", 23.51, 90.1),
-        ("densenet121", "DenseNet-121", 6.96, 27.2),
-        ("efficientnet_b0", "EfficientNet-B0", 4.01, 15.6),
-        ("swin_tiny", "Swin Transformer Tiny", 27.52, 105.8),
+def run_hardware_benchmark(
+    protocol: str,
+    results_root: str = "RESULTS/FINAL_V2",
+    benchmark_config: str = "configs/final_experiment.yaml",
+    save_dir: Optional[str] = None,
+) -> pd.DataFrame:
+    with open(benchmark_config, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)["latency"]
+    order = base_model_order()
+    artifact_dir = Path(results_root) / protocol / "ensembles" / "ensemble_artifacts"
+    required_artifacts = [
+        artifact_dir / "weighted_voting.json",
+        artifact_dir / "stacking_lr.joblib",
+        artifact_dir / "stacking_rf.joblib",
+        artifact_dir / "stacking_xgb.json",
     ]
+    missing = [str(path) for path in required_artifacts if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Fitted ensemble artifact(s) missing: {missing}")
 
-    results = []
+    rows = []
+    raw_results: Dict[str, object] = {}
+    devices = [torch.device("cpu")]
+    if torch.cuda.is_available():
+        devices.insert(0, torch.device("cuda"))
 
-    # 1. Base Models Benchmarks
-    loaded_models_gpu = {}
-    loaded_models_cpu = {}
-
-    for key, disp_name, params_m, size_mb in models_info:
-        # Create models
-        m_gpu = create_model(key, pretrained=False, num_classes=6)
-        m_cpu = create_model(key, pretrained=False, num_classes=6)
-
-        # GPU Benchmark
-        if has_cuda:
-            gpu_lat, gpu_fps = benchmark_model_latency(m_gpu, torch.device("cuda"))
-            loaded_models_gpu[key] = m_gpu
+    for device in devices:
+        if device.type == "cuda":
+            warmup, iterations = int(config["gpu_warmup"]), int(config["gpu_iterations"])
         else:
-            gpu_lat, gpu_fps = 0.0, 0.0
+            warmup, iterations = int(config["cpu_warmup"]), int(config["cpu_iterations"])
+        repeats = int(config["repeats"])
+        dummy_input = torch.randn(*config["input_shape"], device=device)
+        families: Dict[str, FoldAveragedModel] = {}
+        checkpoint_paths: Dict[str, List[Path]] = {}
+        for model_name in order:
+            family, paths = _load_family(results_root, protocol, model_name, device)
+            families[model_name] = family
+            checkpoint_paths[model_name] = paths
 
-        # CPU Benchmark
-        cpu_lat, cpu_fps = benchmark_model_latency(m_cpu, torch.device("cpu"), warmup_runs=10, test_runs=30)
-        loaded_models_cpu[key] = m_cpu
+        for model_name in order:
+            measurement = _benchmark_callable(
+                lambda name=model_name: families[name](dummy_input),
+                device, warmup, iterations, repeats,
+            )
+            parameter_count = sum(parameter.numel() for parameter in families[model_name].parameters())
+            storage_bytes = sum(path.stat().st_size for path in checkpoint_paths[model_name])
+            rows.append(_row(model_name, "base", device, measurement, parameter_count, storage_bytes, warmup, iterations, repeats))
+            raw_results[f"{device.type}:{model_name}"] = measurement
 
-        results.append({
-            "Architecture / Model": disp_name,
-            "Type": "Base Backbone",
-            "Params (M)": f"{params_m:.2f}M",
-            "Size (MB)": f"{size_mb:.1f} MB",
-            "GPU Latency (ms)": f"{gpu_lat:.2f} ms" if has_cuda else "N/A",
-            "GPU Throughput (FPS)": f"{gpu_fps:.1f} FPS" if has_cuda else "N/A",
-            "CPU Latency (ms)": f"{cpu_lat:.2f} ms",
-            "CPU Throughput (FPS)": f"{cpu_fps:.1f} FPS",
-        })
+        total_parameters = sum(
+            parameter.numel() for family in families.values() for parameter in family.parameters()
+        )
+        base_storage = sum(
+            path.stat().st_size for paths in checkpoint_paths.values() for path in paths
+        )
+        methods = [
+            "soft_voting", "weighted_voting", "stacking_logistic_regression",
+            "stacking_random_forest", "stacking_xgboost",
+        ]
+        for method in methods:
+            operation = _ensemble_operation(
+                method, families, order, dummy_input, artifact_dir
+            )
+            measurement = _benchmark_callable(
+                operation, device, warmup, iterations, repeats
+            )
+            artifact_bytes = 0
+            if method == "weighted_voting":
+                artifact_bytes = (artifact_dir / "weighted_voting.json").stat().st_size
+            elif method == "stacking_logistic_regression":
+                artifact_bytes = (artifact_dir / "stacking_lr.joblib").stat().st_size
+            elif method == "stacking_random_forest":
+                artifact_bytes = (artifact_dir / "stacking_rf.joblib").stat().st_size
+            elif method == "stacking_xgboost":
+                artifact_bytes = (artifact_dir / "stacking_xgb.json").stat().st_size
+            rows.append(_row(method, "ensemble", device, measurement, total_parameters, base_storage + artifact_bytes, warmup, iterations, repeats))
+            raw_results[f"{device.type}:{method}"] = measurement
 
-    # 2. Ensemble Methods Benchmark
-    # Soft Voting Ensemble: Sequential 4 models forward pass + probability mean
-    class SoftVotingModule(nn.Module):
-        def __init__(self, models_dict):
-            super().__init__()
-            self.models = nn.ModuleList(list(models_dict.values()))
-        def forward(self, x):
-            probs = [torch.softmax(m(x), dim=1) for m in self.models]
-            return torch.mean(torch.stack(probs), dim=0)
+        del families
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
-    # GPU Ensemble
-    total_params_ens = sum(m[2] for m in models_info)
-    total_size_ens = sum(m[3] for m in models_info)
-
-    if has_cuda and len(loaded_models_gpu) == 4:
-        soft_ens_gpu = SoftVotingModule(loaded_models_gpu)
-        ens_gpu_lat, ens_gpu_fps = benchmark_model_latency(soft_ens_gpu, torch.device("cuda"))
-    else:
-        ens_gpu_lat, ens_gpu_fps = 0.0, 0.0
-
-    soft_ens_cpu = SoftVotingModule(loaded_models_cpu)
-    ens_cpu_lat, ens_cpu_fps = benchmark_model_latency(soft_ens_cpu, torch.device("cpu"), warmup_runs=5, test_runs=20)
-
-    results.append({
-        "Architecture / Model": "Soft Voting Ensemble (4 Backbones)",
-        "Type": "Voting Ensemble",
-        "Params (M)": f"{total_params_ens:.2f}M",
-        "Size (MB)": f"{total_size_ens:.1f} MB",
-        "GPU Latency (ms)": f"{ens_gpu_lat:.2f} ms" if has_cuda else "N/A",
-        "GPU Throughput (FPS)": f"{ens_gpu_fps:.1f} FPS" if has_cuda else "N/A",
-        "CPU Latency (ms)": f"{ens_cpu_lat:.2f} ms",
-        "CPU Throughput (FPS)": f"{ens_cpu_fps:.1f} FPS",
+    frame = pd.DataFrame(rows)
+    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(output / f"latency_{protocol}.csv", index=False)
+    environment = runtime_identity()
+    environment.update({
+        "protocol": protocol,
+        "dtype": "float32",
+        "batch_size": int(config["batch_size"]),
+        "input_shape": config["input_shape"],
+        "torch_thread_count": torch.get_num_threads(),
+        "gpu_warmup": int(config["gpu_warmup"]),
+        "gpu_iterations": int(config["gpu_iterations"]),
+        "cpu_warmup": int(config["cpu_warmup"]),
+        "cpu_iterations": int(config["cpu_iterations"]),
+        "repeats": int(config["repeats"]),
+        "timing": "end_to_end synchronized wall clock; CUDA event timing also recorded",
+        "raw_measurements": raw_results,
     })
+    write_json(output / f"latency_{protocol}_environment.json", environment)
+    return frame
 
-    # Stacking Ensemble (4 Backbones + Meta Learner Classifier ~ 0.5ms overhead)
-    meta_overhead_ms = 0.45
-    stk_gpu_lat = ens_gpu_lat + meta_overhead_ms if has_cuda else 0.0
-    stk_gpu_fps = 1000.0 / stk_gpu_lat if stk_gpu_lat > 0 else 0.0
-    stk_cpu_lat = ens_cpu_lat + meta_overhead_ms
-    stk_cpu_fps = 1000.0 / stk_cpu_lat if stk_cpu_lat > 0 else 0.0
 
-    results.append({
-        "Architecture / Model": "Stacking (Random Forest Meta-Learner)",
-        "Type": "Stacking Ensemble",
-        "Params (M)": f"{total_params_ens + 0.05:.2f}M",
-        "Size (MB)": f"{total_size_ens + 1.2:.1f} MB",
-        "GPU Latency (ms)": f"{stk_gpu_lat:.2f} ms" if has_cuda else "N/A",
-        "GPU Throughput (FPS)": f"{stk_gpu_fps:.1f} FPS" if has_cuda else "N/A",
-        "CPU Latency (ms)": f"{stk_cpu_lat:.2f} ms",
-        "CPU Throughput (FPS)": f"{stk_cpu_fps:.1f} FPS",
-    })
-
-    df = pd.DataFrame(results)
-    print(df.to_string(index=False))
-    print("=" * 100)
-
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        csv_p = os.path.join(save_dir, "latency_benchmark.csv")
-        md_p = os.path.join(save_dir, "latency_benchmark.md")
-        df.to_csv(csv_p, index=False)
-        with open(md_p, "w", encoding="utf-8") as f:
-            f.write("# Hardware Efficiency & Inference Latency Benchmark (CPU vs. GPU)\n\n")
-            f.write(f"- **Test GPU**: `{gpu_name}`\n")
-            f.write(f"- **Test CPU**: `{os.cpu_count()}-core Host Machine`\n\n")
-            f.write(df.to_markdown(index=False))
-        print(f"\n[Saved Latency Reports] -> '{csv_p}' and '{md_p}'")
-
-    return df
+def _row(
+    method: str,
+    method_type: str,
+    device: torch.device,
+    measurement: Dict[str, object],
+    parameters: int,
+    storage_bytes: int,
+    warmup: int,
+    iterations: int,
+    repeats: int,
+) -> Dict[str, object]:
+    return {
+        "method": method,
+        "type": method_type,
+        "device": device.type,
+        "latency_ms": measurement["latency_ms"],
+        "cuda_event_latency_ms": measurement["cuda_event_latency_ms"],
+        "throughput_per_second": measurement["throughput_per_second"],
+        "actual_parameters": parameters,
+        "actual_artifact_storage_bytes": storage_bytes,
+        "batch_size": 1,
+        "warmup": warmup,
+        "iterations": iterations,
+        "repeats": repeats,
+    }
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Hardware Efficiency & Inference Latency Benchmark")
-    parser.add_argument("--save-dir", default="outputs/verification", help="Directory to save output reports")
+    parser = argparse.ArgumentParser(description="Benchmark real FINAL_V2 pipelines")
+    parser.add_argument("--protocol", required=True, choices=["single_split", "oof"])
+    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--save-dir", default=None)
     args = parser.parse_args()
-    run_hardware_benchmark(save_dir=args.save_dir)
+    run_hardware_benchmark(args.protocol, args.results_root, save_dir=args.save_dir)
