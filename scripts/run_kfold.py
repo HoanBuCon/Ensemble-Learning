@@ -38,6 +38,8 @@ def run_kfold_experiment(
     force_retrain: bool = False,
 ) -> None:
     """Run 5-Fold Cross Validation for a single configuration."""
+    if n_splits != 5 or split_seed != 42:
+        raise ValueError("FINAL_V2 OOF protocol is fixed at 5 folds with split seed 42")
     cfg = load_config(config_path)
     model_name = cfg.model.name
 
@@ -45,10 +47,10 @@ def run_kfold_experiment(
     print(f"  RUNNING {n_splits}-FOLD CROSS VALIDATION: {model_name.upper()} ({config_path})")
     print(f"{'='*75}\n")
 
-    out_d = output_dir or os.path.join("RESULTS", "OOF_TRAINING", "outputs", model_name, "kfold")
+    out_d = output_dir or os.path.join("RESULTS", "FINAL_V2", "oof", model_name, "kfold")
 
     generator = OOFGenerator(
-        config=cfg,
+        config=config_path,
         n_splits=n_splits,
         split_seed=split_seed,
         output_dir=out_d,
@@ -63,12 +65,16 @@ def run_all_kfold_experiments(
     split_seed: int = 42,
     force_retrain: bool = False,
     eval_ensemble: bool = True,
-    outputs_dir: str = "RESULTS/OOF_TRAINING/outputs",
+    outputs_dir: str = "RESULTS/FINAL_V2/oof",
 ) -> None:
     """Run 5-Fold Cross Validation sequentially across all configured backbone models and evaluate Meta-Learners."""
     if not config_paths:
-        config_paths = sorted(glob.glob("configs/*.yaml"))
-        config_paths = [c for c in config_paths if not c.endswith("dataset.yaml")]
+        config_paths = [
+            "configs/densenet121.yaml",
+            "configs/efficientnet_b0.yaml",
+            "configs/resnet50.yaml",
+            "configs/swin_tiny.yaml",
+        ]
 
     print(f"\n{'='*75}")
     print(f"  EXECUTING {n_splits}-FOLD CROSS VALIDATION ACROSS {len(config_paths)} BACKBONES")
@@ -91,11 +97,8 @@ def run_all_kfold_experiments(
         print(f"\n{'='*75}")
         print("  STEP 2: TRAINING META-LEARNERS & ENSEMBLE BENCHMARK (OOF MODE)")
         print(f"{'='*75}\n")
-        try:
-            from scripts.run_ensemble_eval import run_ensemble_evaluation
-            run_ensemble_evaluation(mode="oof", outputs_dir=outputs_dir)
-        except Exception as e:
-            print(f"Warning: Automatic ensemble evaluation failed: {e}")
+        from scripts.run_ensemble_eval import run_ensemble_evaluation
+        run_ensemble_evaluation(protocol="oof", results_root="RESULTS/FINAL_V2")
 
 
 if __name__ == "__main__":
@@ -130,8 +133,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--outputs-dir",
-        default="RESULTS/OOF_TRAINING/outputs",
-        help="Directory to save K-Fold outputs (default: 'RESULTS/OOF_TRAINING/outputs')",
+        default="RESULTS/FINAL_V2/oof",
+        help="Directory to save FINAL_V2 OOF outputs",
     )
     args = parser.parse_args()
 
@@ -150,7 +153,9 @@ if __name__ == "__main__":
             )
         if not args.no_ensemble:
             from scripts.run_ensemble_eval import run_ensemble_evaluation
-            run_ensemble_evaluation(mode="oof", outputs_dir=args.outputs_dir)
+            if os.path.normpath(args.outputs_dir) != os.path.normpath("RESULTS/FINAL_V2/oof"):
+                raise ValueError("Final ensemble replay requires RESULTS/FINAL_V2/oof")
+            run_ensemble_evaluation(protocol="oof", results_root="RESULTS/FINAL_V2")
     else:
         run_all_kfold_experiments(
             config_paths=None,

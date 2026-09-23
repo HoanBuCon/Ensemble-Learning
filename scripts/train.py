@@ -22,7 +22,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.engine.trainer import Trainer
-from src.utils.config import load_config
+from src.utils.provenance import verify_dataset_snapshot, write_experiment_manifest
 
 
 def train(config_path: str, resume: bool = False) -> Dict[str, Any]:
@@ -36,20 +36,33 @@ def train(config_path: str, resume: bool = False) -> Dict[str, Any]:
     Returns:
         Dictionary with training results (best accuracy, timing, etc.).
     """
-    config = load_config(config_path)
-    trainer = Trainer(config, resume=resume)
+    verify_dataset_snapshot()
+    trainer = Trainer(config_path, resume=resume)
+    config = trainer.config
 
     # Train
     results = trainer.train()
 
     # Evaluate with best model
     trainer.load_best_model()
-    metrics = trainer.evaluate()
+    val_metrics = trainer.evaluate(dataloader=trainer.val_loader)
+    if trainer.test_loader is None:
+        raise FileNotFoundError("Frozen dataset test split is required for final evaluation")
+    test_metrics = trainer.evaluate(dataloader=trainer.test_loader)
 
-    # Save probability cache for ensemble
-    trainer.save_predictions()
-
-    results["eval_metrics"] = metrics
+    results["val_metrics"] = val_metrics
+    results["eval_metrics"] = test_metrics
+    results["save_dir"] = trainer.save_dir
+    write_experiment_manifest(
+        os.path.join(trainer.save_dir, "experiment_manifest.json"),
+        protocol="single_split",
+        model=config.model.name,
+        config_path=config_path,
+        seed=config.seed,
+        checkpoint_path=os.path.join(trainer.save_dir, "best_model.pth"),
+        prediction_path=os.path.join(trainer.save_dir, "test_predictions.npz"),
+        arguments={"resume": resume},
+    )
     return results
 
 

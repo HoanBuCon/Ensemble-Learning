@@ -277,10 +277,21 @@ class Trainer:
             start_epoch (1-indexed).
         """
         save_dir = self.config.checkpoint.save_dir
-        metrics_path = os.path.join(save_dir, "metrics.json")
+        metrics_path = os.path.join(save_dir, "test_metrics.json")
         last_ckpt_path = os.path.join(save_dir, "last_model.pth")
 
         if os.path.exists(metrics_path):
+            best_ckpt_path = os.path.join(save_dir, "best_model.pth")
+            if not os.path.exists(best_ckpt_path):
+                raise FileNotFoundError(
+                    "Completed experiment is missing its required best checkpoint: "
+                    f"{best_ckpt_path}"
+                )
+            best_ckpt = self.ckpt_manager.load_best(device=str(self.device))
+            self.ckpt_manager.restore_tracking(best_ckpt)
+            self._best_metric = self.ckpt_manager.best_value
+            if "history" in best_ckpt and isinstance(best_ckpt["history"], dict):
+                self.history = best_ckpt["history"]
             self.logger.info(
                 f"Experiment '{self.config.experiment_name}' at '{save_dir}' is already COMPLETED (metrics.json found). "
                 f"Skipping training."
@@ -314,7 +325,7 @@ class Trainer:
         best_ckpt_path = os.path.join(save_dir, "best_model.pth")
         if os.path.exists(best_ckpt_path):
             best_ckpt = self.ckpt_manager.load_best(device=str(self.device))
-            self.ckpt_manager.best_value = best_ckpt.get("best_value", self.ckpt_manager.best_value)
+            self.ckpt_manager.restore_tracking(best_ckpt)
             self._best_metric = self.ckpt_manager.best_value
 
         last_epoch = ckpt.get("epoch", 0)
@@ -345,7 +356,7 @@ class Trainer:
             start_epoch = self._restore_checkpoint()
 
         if start_epoch > total_epochs:
-            best_val_acc = (
+            raw_max_val_accuracy = (
                 max(self.history["val_accuracy"])
                 if self.history.get("val_accuracy")
                 else (self._best_metric if self._best_metric != -float("inf") else 0.0)
@@ -353,8 +364,9 @@ class Trainer:
             return {
                 "model_name": cfg.model.name,
                 "experiment_name": cfg.experiment_name,
-                "best_val_accuracy": best_val_acc,
-                "best_epoch": self.ckpt_manager.best_epoch or total_epochs,
+                "raw_max_val_accuracy": raw_max_val_accuracy,
+                "accepted_checkpoint_val_accuracy": self.ckpt_manager.best_value,
+                "accepted_checkpoint_epoch": self.ckpt_manager.best_epoch,
                 "num_params": self.num_params,
                 "eval_metrics": {},
                 "history": self.history,
@@ -368,7 +380,7 @@ class Trainer:
         )
 
         global_start = time.time()
-        best_epoch = max(0, start_epoch - 1)
+        accepted_checkpoint_epoch = self.ckpt_manager.best_epoch
 
         for epoch in range(start_epoch, total_epochs + 1):
             epoch_start = time.time()
@@ -464,6 +476,7 @@ class Trainer:
                 "val_accuracy": val_acc,
             }
 
+            is_best = False
             if cfg.checkpoint.save_best:
                 is_best = self.ckpt_manager.save_if_best(
                     model=self.model,
@@ -475,7 +488,7 @@ class Trainer:
                     history=self.history,
                 )
                 if is_best:
-                    best_epoch = epoch
+                    accepted_checkpoint_epoch = epoch
                     self.logger.info(
                         f"New best {cfg.checkpoint.monitor}: {current_metric:.4f} "
                         f"(epoch {epoch})"
@@ -516,19 +529,21 @@ class Trainer:
         if self.tb_writer is not None:
             self.tb_writer.close()
 
-        best_val_acc = max(self.history["val_accuracy"])
+        raw_max_val_accuracy = max(self.history["val_accuracy"])
+        accepted_checkpoint_val_accuracy = self.ckpt_manager.best_value
         log_training_end(
             experiment_name=cfg.experiment_name,
-            best_accuracy=best_val_acc,
-            best_epoch=best_epoch,
+            best_accuracy=accepted_checkpoint_val_accuracy,
+            best_epoch=accepted_checkpoint_epoch or 0,
             total_time=total_time_str,
         )
 
         return {
             "experiment_name": cfg.experiment_name,
             "model_name": cfg.model.name,
-            "best_val_accuracy": best_val_acc,
-            "best_epoch": best_epoch,
+            "raw_max_val_accuracy": raw_max_val_accuracy,
+            "accepted_checkpoint_val_accuracy": accepted_checkpoint_val_accuracy,
+            "accepted_checkpoint_epoch": accepted_checkpoint_epoch,
             "total_time_seconds": total_time,
             "total_time_str": total_time_str,
             "num_params": self.num_params,
@@ -645,7 +660,7 @@ class Trainer:
             Tuple of ``(logits, probabilities, predictions)``.
         """
         dl = dataloader or self.test_loader or self.val_loader
-        logits, probs, preds, _, _ = run_inference(
+        logits, probs, preds, _, _, _ = run_inference(
             self.model, dl, str(self.device)
         )
         return logits, probs, preds
@@ -669,12 +684,12 @@ class Trainer:
         dataset = getattr(dl, "dataset", None)
         class_to_idx = getattr(dataset, "class_to_idx", None)
 
-        logits, probs, preds, labels, _ = run_inference(
+        logits, probs, preds, labels, paths, _ = run_inference(
             self.model, dl, str(self.device)
         )
         save_predictions(
-            logits, probs, preds, labels, out,
-            class_to_idx=class_to_idx, split=split_name,
+            logits, probs, preds, labels, paths, out,
+            class_to_idx=class_to_idx, split=split_name, protocol="single_split",
         )
         self.logger.info(f"Predictions ({split_name} split) saved to {out}")
 
@@ -704,6 +719,7 @@ class Trainer:
             output_dir=out,
             device=str(self.device),
             split=split_name,
+            protocol="single_split",
         )
 
     def load_best_model(self) -> None:

@@ -49,6 +49,8 @@ class CheckpointManager:
         self.mode = mode
         self.loss_gate_tolerance = loss_gate_tolerance
         self.min_val_loss: float = float("inf")
+        self.best_val_loss: float = float("inf")
+        self.best_epoch: Optional[int] = None
 
         os.makedirs(save_dir, exist_ok=True)
 
@@ -75,8 +77,14 @@ class CheckpointManager:
         state: Dict[str, Any] = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
+            "best_metric": self.best_value,
             "best_value": self.best_value,
+            "best_epoch": self.best_epoch,
+            "best_val_loss": self.best_val_loss,
             "monitor": self.monitor,
+            "mode": self.mode,
+            "loss_gate_tolerance": self.loss_gate_tolerance,
+            "min_observed_val_loss": self.min_val_loss,
         }
         if optimizer is not None:
             state["optimizer_state_dict"] = optimizer.state_dict()
@@ -122,6 +130,9 @@ class CheckpointManager:
                         return False
 
             self.best_value = current_metric
+            self.best_epoch = epoch
+            if metrics is not None and "val_loss" in metrics:
+                self.best_val_loss = float(metrics["val_loss"])
             state = self._build_state(
                 model, optimizer, scheduler, epoch, metrics, history
             )
@@ -159,46 +170,26 @@ class CheckpointManager:
             json.dump(metrics, f, indent=2, default=str)
 
     def load_best(self, device: str = "cpu") -> Dict[str, Any]:
-        """Load the best checkpoint, falling back to alternate result directories if needed."""
+        """Load the exact requested best checkpoint or fail explicitly."""
         primary_path = os.path.join(self.save_dir, "best_model.pth")
-        if os.path.exists(primary_path):
-            return self._load(primary_path, device)
-
-        folder_name = os.path.basename(self.save_dir)
-        fallback_candidates = [
-            os.path.join("RESULTS", "DEFAULT_TRAINING", "outputs", folder_name, "best_model.pth"),
-            os.path.join("RESULTS", "DEFAULT_TRAINING", folder_name, "best_model.pth"),
-            os.path.join("RESULTS", "OOF_TRAINING", "outputs", folder_name, "kfold", "fold_0", "best_model.pth"),
-            os.path.join("RESULTS", "OOF_TRAINING", folder_name, "kfold", "fold_0", "best_model.pth"),
-            os.path.join("outputs", folder_name, "best_model.pth"),
-            os.path.join("Default_Result_V2", "outputs", folder_name, "best_model.pth"),
-            os.path.join("OOF_Results", "outputs", folder_name, "kfold", "fold_0", "best_model.pth"),
-        ]
-        for cand in fallback_candidates:
-            if os.path.exists(cand):
-                return self._load(cand, device)
-
         return self._load(primary_path, device)
 
     def load_last(self, device: str = "cpu") -> Dict[str, Any]:
-        """Load the last checkpoint, falling back to alternate result directories if needed."""
+        """Load the exact requested last checkpoint or fail explicitly."""
         primary_path = os.path.join(self.save_dir, "last_model.pth")
-        if os.path.exists(primary_path):
-            return self._load(primary_path, device)
-
-        folder_name = os.path.basename(self.save_dir)
-        fallback_candidates = [
-            os.path.join("RESULTS", "DEFAULT_TRAINING", "outputs", folder_name, "last_model.pth"),
-            os.path.join("RESULTS", "DEFAULT_TRAINING", folder_name, "last_model.pth"),
-            os.path.join("RESULTS", "OOF_TRAINING", "outputs", folder_name, "kfold", "fold_0", "last_model.pth"),
-            os.path.join("RESULTS", "OOF_TRAINING", folder_name, "kfold", "fold_0", "last_model.pth"),
-            os.path.join("outputs", folder_name, "last_model.pth"),
-        ]
-        for cand in fallback_candidates:
-            if os.path.exists(cand):
-                return self._load(cand, device)
-
         return self._load(primary_path, device)
+
+    def restore_tracking(self, state: Dict[str, Any]) -> None:
+        """Restore checkpoint-selection state from a persisted checkpoint."""
+        self.best_value = float(
+            state.get("best_metric", state.get("best_value", self.best_value))
+        )
+        best_epoch = state.get("best_epoch", state.get("epoch"))
+        self.best_epoch = int(best_epoch) if best_epoch is not None else None
+        self.best_val_loss = float(state.get("best_val_loss", self.best_val_loss))
+        self.min_val_loss = float(
+            state.get("min_observed_val_loss", self.min_val_loss)
+        )
 
     @staticmethod
     def _load(path: str, device: str = "cpu") -> Dict[str, Any]:

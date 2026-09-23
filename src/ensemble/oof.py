@@ -40,10 +40,13 @@ from tqdm import tqdm
 
 from src.datasets.dataset import ImageFolderDataset
 from src.datasets.transforms import build_transforms
+from src.ensemble.artifacts import sample_ids_from_paths, save_prediction_artifact
+from src.engine.checkpoint import CheckpointManager
 from src.models.factory import create_model
 from src.utils.config import ExperimentConfig, load_config, load_dataset_config
 from src.utils.logger import CSVLogger, log_training_startup_banner, setup_logger
 from src.utils.metrics import compute_metrics
+from src.utils.provenance import verify_dataset_snapshot, write_experiment_manifest
 from src.utils.reproducibility import get_generator, seed_worker, set_seed
 from src.utils.visualization import (
     plot_confusion_matrix,
@@ -79,6 +82,7 @@ class OOFGenerator:
         output_dir: Optional[str] = None,
         force_retrain: bool = False,
     ) -> None:
+        self.config_path = config if isinstance(config, str) else None
         if isinstance(config, str):
             config = load_config(config)
 
@@ -164,13 +168,28 @@ class OOFGenerator:
                 - ``test_probabilities``: shape ``(N_test, C)`` or ``None``
         """
         set_seed(self.config.seed)
+        verify_dataset_snapshot()
+        if self.config_path is None:
+            raise ValueError(
+                "FINAL_V2 OOF provenance requires OOFGenerator(config=<yaml path>)"
+            )
         cfg = self.config
 
         oof_prob_file = os.path.join(self.output_dir, "oof_probabilities.npy")
         oof_lbl_file = os.path.join(self.output_dir, "oof_labels.npy")
         test_prob_file = os.path.join(self.output_dir, "test_probabilities.npy")
 
-        if not self.force_retrain and os.path.exists(oof_prob_file) and os.path.exists(oof_lbl_file):
+        fold_manifests = [
+            os.path.join(self.output_dir, f"fold_{index}", "experiment_manifest.json")
+            for index in range(1, self.n_splits + 1)
+        ]
+        if (
+            not self.force_retrain
+            and os.path.exists(oof_prob_file)
+            and os.path.exists(oof_lbl_file)
+            and os.path.exists(os.path.join(self.output_dir, "oof_predictions.npz"))
+            and all(os.path.exists(path) for path in fold_manifests)
+        ):
             self.logger.info(f"Existing OOF predictions found in '{self.output_dir}'. Loading cached arrays.")
             oof_probs = np.load(oof_prob_file)
             oof_lbls = np.load(oof_lbl_file)
@@ -194,15 +213,47 @@ class OOFGenerator:
             transform=val_transform,
         )
 
+        validation_candidates = [
+            os.path.join(cfg.data.root, "val"),
+            os.path.join(cfg.data.root, "valid"),
+        ]
+        validation_dirs = [path for path in validation_candidates if os.path.isdir(path)]
+        if len(validation_dirs) != 1:
+            raise RuntimeError(
+                "OOF training requires exactly one fixed external validation split "
+                f"('data/val' or 'data/valid'); found: {validation_dirs or 'none'}"
+            )
+        external_val_dataset = ImageFolderDataset(
+            root=validation_dirs[0],
+            transform=val_transform,
+        )
+
         num_classes = full_train_dataset.num_classes
         num_samples = len(full_train_dataset)
         class_names = full_train_dataset.classes
         all_labels = np.array([s[1] for s in full_train_dataset.samples])
+        all_sample_ids = sample_ids_from_paths(
+            [sample[0] for sample in full_train_dataset.samples]
+        )
+        if external_val_dataset.classes != class_names:
+            raise RuntimeError(
+                "External validation class order does not match the training split: "
+                f"{external_val_dataset.classes} != {class_names}"
+            )
+
+        external_val_loader = DataLoader(
+            external_val_dataset,
+            batch_size=cfg.data.batch_size,
+            shuffle=False,
+            num_workers=cfg.data.num_workers,
+            pin_memory=cfg.data.pin_memory,
+        )
 
         # Test set loader (if available)
         test_dir = os.path.join(cfg.data.root, "test")
         test_loader = None
         test_labels = None
+        test_sample_ids = None
         if os.path.isdir(test_dir):
             test_transform = build_transforms(
                 cfg.augmentation.test, image_size=image_size, stage="test"
@@ -218,8 +269,12 @@ class OOFGenerator:
                 pin_memory=cfg.data.pin_memory,
             )
             test_labels = np.array([s[1] for s in test_dataset.samples])
+            test_sample_ids = sample_ids_from_paths(
+                [sample[0] for sample in test_dataset.samples]
+            )
 
         oof_probabilities = np.zeros((num_samples, num_classes), dtype=np.float32)
+        oof_assignment_counts = np.zeros(num_samples, dtype=np.int8)
         test_probabilities_list: List[np.ndarray] = []
         fold_metrics_list: List[Dict[str, float]] = []
 
@@ -245,7 +300,7 @@ class OOFGenerator:
             f"{num_samples} samples, {num_classes} classes (Split Seed: {self.split_seed})"
         )
 
-        for fold_idx, (train_indices, val_indices) in enumerate(
+        for fold_idx, (train_indices, outer_holdout_indices) in enumerate(
             skf.split(np.zeros(num_samples), all_labels)
         ):
             fold_num = fold_idx + 1
@@ -255,7 +310,7 @@ class OOFGenerator:
             self.logger.info(f"\n{'='*55}\n  STARTING FOLD {fold_num}/{self.n_splits}\n{'='*55}")
 
             # Check if this fold was already completed
-            fold_prob_path = os.path.join(fold_dir, "val_probabilities.npy")
+            fold_prob_path = os.path.join(fold_dir, "outer_holdout_probabilities.npy")
             fold_metrics_path = os.path.join(fold_dir, "metrics.json")
             fold_ckpt_path = os.path.join(fold_dir, "best_model.pth")
 
@@ -264,10 +319,21 @@ class OOFGenerator:
                 and os.path.exists(fold_prob_path)
                 and os.path.exists(fold_metrics_path)
                 and os.path.exists(fold_ckpt_path)
+                and os.path.exists(os.path.join(fold_dir, "experiment_manifest.json"))
             ):
                 self.logger.info(f"Fold {fold_num} already completed. Loading cached results.")
                 fold_probs = np.load(fold_prob_path)
-                oof_probabilities[val_indices] = fold_probs
+                if len(fold_probs) != len(outer_holdout_indices):
+                    raise RuntimeError(
+                        f"Fold {fold_num} cached outer-holdout row count does not match "
+                        "the current deterministic split"
+                    )
+                self._place_oof_rows(
+                    oof_probabilities,
+                    oof_assignment_counts,
+                    outer_holdout_indices,
+                    fold_probs,
+                )
 
                 with open(fold_metrics_path, "r", encoding="utf-8") as f:
                     f_metrics = json.load(f)
@@ -296,8 +362,11 @@ class OOFGenerator:
 
             set_seed(cfg.seed + fold_idx)
 
+            self._assert_fold_boundary(train_indices, outer_holdout_indices)
             train_subset = Subset(full_train_dataset, train_indices.tolist())
-            val_subset = Subset(full_train_dataset_val, val_indices.tolist())
+            outer_holdout_subset = Subset(
+                full_train_dataset_val, outer_holdout_indices.tolist()
+            )
 
             g = get_generator(cfg.seed + fold_idx)
 
@@ -311,8 +380,8 @@ class OOFGenerator:
                 generator=g,
                 drop_last=True,
             )
-            fold_val_loader = DataLoader(
-                val_subset,
+            outer_holdout_loader = DataLoader(
+                outer_holdout_subset,
                 batch_size=cfg.data.batch_size,
                 shuffle=False,
                 num_workers=cfg.data.num_workers,
@@ -326,18 +395,53 @@ class OOFGenerator:
                 drop_rate=cfg.model.drop_rate,
             ).to(self.device)
 
-            fold_probs, f_metrics, test_probs_fold = self._train_and_evaluate_fold(
+            model = self._train_fold(
                 model=model,
-                train_loader=fold_train_loader,
-                val_loader=fold_val_loader,
-                test_loader=test_loader,
-                val_labels=all_labels[val_indices],
-                class_names=class_names,
+                fold_train_loader=fold_train_loader,
+                external_val_loader=external_val_loader,
                 fold_idx=fold_idx,
                 fold_dir=fold_dir,
             )
 
-            oof_probabilities[val_indices] = fold_probs
+            fold_probs, f_metrics = self._evaluate_outer_holdout(
+                frozen_model=model,
+                outer_holdout_loader=outer_holdout_loader,
+                outer_holdout_labels=all_labels[outer_holdout_indices],
+                outer_holdout_sample_ids=all_sample_ids[outer_holdout_indices],
+                class_names=class_names,
+                fold_idx=fold_idx,
+                fold_dir=fold_dir,
+            )
+            test_probs_fold = None
+            if test_loader is not None:
+                test_probs_fold = self._predict(model, test_loader)
+                np.save(os.path.join(fold_dir, "test_probabilities.npy"), test_probs_fold)
+
+            write_experiment_manifest(
+                os.path.join(fold_dir, "experiment_manifest.json"),
+                protocol="oof",
+                model=cfg.model.name,
+                fold=fold_num,
+                config_path=self.config_path,
+                seed=cfg.seed + fold_idx,
+                checkpoint_path=os.path.join(fold_dir, "best_model.pth"),
+                prediction_path=os.path.join(
+                    fold_dir, "outer_holdout_predictions.npz"
+                ),
+                arguments={
+                    "n_splits": self.n_splits,
+                    "shuffle": True,
+                    "split_random_state": self.split_seed,
+                    "external_validation_directory": os.path.basename(validation_dirs[0]),
+                },
+            )
+
+            self._place_oof_rows(
+                oof_probabilities,
+                oof_assignment_counts,
+                outer_holdout_indices,
+                fold_probs,
+            )
             fold_metrics_list.append({
                 "Fold": fold_num,
                 "Accuracy": f_metrics["accuracy"] * 100.0,
@@ -352,6 +456,11 @@ class OOFGenerator:
             del model
             torch.cuda.empty_cache()
 
+        if not np.all(oof_assignment_counts == 1):
+            raise AssertionError(
+                "OOF generation did not assign every training sample exactly once"
+            )
+
         # Average test predictions across folds
         test_probabilities = None
         if test_probabilities_list:
@@ -362,6 +471,32 @@ class OOFGenerator:
         np.save(os.path.join(self.output_dir, "oof_labels.npy"), all_labels)
         if test_probabilities is not None:
             np.save(os.path.join(self.output_dir, "test_probabilities.npy"), test_probabilities)
+
+        save_prediction_artifact(
+            os.path.join(self.output_dir, "oof_predictions.npz"),
+            sample_ids=all_sample_ids,
+            y_true=all_labels,
+            probabilities=oof_probabilities,
+            predictions=np.argmax(oof_probabilities, axis=1),
+            class_order=class_names,
+            protocol="oof",
+            method=cfg.model.name,
+            split="oof_train",
+        )
+        if test_probabilities is not None:
+            if test_labels is None or test_sample_ids is None:
+                raise AssertionError("Test identity is unavailable for OOF aggregation")
+            save_prediction_artifact(
+                os.path.join(self.output_dir, "test_predictions.npz"),
+                sample_ids=test_sample_ids,
+                y_true=test_labels,
+                probabilities=test_probabilities,
+                predictions=np.argmax(test_probabilities, axis=1),
+                class_order=class_names,
+                protocol="oof",
+                method=cfg.model.name,
+                split="test",
+            )
 
         # Save class mappings and experiment config
         class_to_idx = getattr(full_train_dataset, "class_to_idx", {c: i for i, c in enumerate(class_names)})
@@ -419,18 +554,47 @@ class OOFGenerator:
 
         return oof_probabilities, all_labels, test_probabilities
 
-    def _train_and_evaluate_fold(
+    @staticmethod
+    def _assert_fold_boundary(
+        fold_train_indices: np.ndarray,
+        outer_holdout_indices: np.ndarray,
+    ) -> None:
+        """Assert that the cross-fitting optimization and inference sets are disjoint."""
+        overlap = np.intersect1d(fold_train_indices, outer_holdout_indices)
+        if overlap.size:
+            raise AssertionError(
+                f"Outer-holdout leakage: {overlap.size} indices occur in fold training"
+            )
+
+    @staticmethod
+    def _place_oof_rows(
+        target: np.ndarray,
+        assignment_counts: np.ndarray,
+        outer_holdout_indices: np.ndarray,
+        predictions: np.ndarray,
+    ) -> None:
+        """Place held-out predictions once at their deterministic source indices."""
+        if len(outer_holdout_indices) != len(predictions):
+            raise AssertionError("OOF prediction row count does not match holdout indices")
+        if np.any(assignment_counts[outer_holdout_indices] != 0):
+            raise AssertionError("An OOF row was assigned more than once")
+        target[outer_holdout_indices] = predictions
+        assignment_counts[outer_holdout_indices] += 1
+
+    def _train_fold(
         self,
         model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        test_loader: Optional[DataLoader],
-        val_labels: np.ndarray,
-        class_names: List[str],
+        fold_train_loader: DataLoader,
+        external_val_loader: DataLoader,
         fold_idx: int,
         fold_dir: str,
-    ) -> Tuple[np.ndarray, Dict[str, Any], Optional[np.ndarray]]:
-        """Execute full training, validation, checkpointing, and evaluation for a single fold."""
+    ) -> nn.Module:
+        """Train one fold using only the fixed external validation split for selection.
+
+        The outer holdout loader is intentionally absent from this API. It cannot
+        influence validation metrics, scheduler decisions, checkpoint acceptance,
+        best epoch, or early stopping.
+        """
         cfg = self.config.train
         fold_num = fold_idx + 1
 
@@ -441,10 +605,15 @@ class OOFGenerator:
         use_amp = cfg.mixed_precision and self.device.type == "cuda"
         scaler = GradScaler("cuda", enabled=use_amp)
 
-        best_val_acc = 0.0
-        best_state = None
-        best_epoch = 0
         early_stop_counter = 0
+        checkpoint_manager = CheckpointManager(
+            save_dir=fold_dir,
+            monitor=self.config.checkpoint.monitor,
+            mode=self.config.checkpoint.mode,
+            loss_gate_tolerance=getattr(
+                self.config.checkpoint, "loss_gate_tolerance", 0.05
+            ),
+        )
 
         history: Dict[str, List[float]] = {
             "train_loss": [],
@@ -453,9 +622,6 @@ class OOFGenerator:
             "val_accuracy": [],
             "lr": [],
         }
-
-        min_val_loss = float("inf")
-        loss_gate_tol = getattr(self.config.checkpoint, "loss_gate_tolerance", 0.05)
 
         for epoch in range(1, cfg.epochs + 1):
             if epoch <= cfg.warmup_epochs:
@@ -471,7 +637,7 @@ class OOFGenerator:
 
             optimizer.zero_grad()
             for step, batch in enumerate(tqdm(
-                train_loader,
+                fold_train_loader,
                 desc=f"Fold {fold_num} Ep {epoch}/{cfg.epochs} [Train]",
                 leave=False,
             )):
@@ -503,13 +669,11 @@ class OOFGenerator:
             train_loss = running_loss / total
             train_acc = 100.0 * correct / total
 
-            # --- Validation ---
-            val_loss, val_acc = self._validate_epoch(model, val_loader, criterion, use_amp)
+            # --- Fixed external validation (never the outer held-out fold) ---
+            val_loss, val_acc = self._validate_epoch(
+                model, external_val_loader, criterion, use_amp
+            )
             current_lr = optimizer.param_groups[0]["lr"]
-
-            # Track minimum validation loss
-            if val_loss < min_val_loss:
-                min_val_loss = val_loss
 
             history["train_loss"].append(train_loss)
             history["train_accuracy"].append(train_acc)
@@ -523,27 +687,37 @@ class OOFGenerator:
                 else:
                     scheduler.step()
 
-            # Checkpoint best with Dual-Metric Loss-Gate Safeguard
-            if val_acc > best_val_acc:
-                max_allowed_loss = (1.0 + loss_gate_tol) * min_val_loss
-                if loss_gate_tol > 0 and val_loss > max_allowed_loss:
-                    self.logger.warning(
-                        f"Fold {fold_num} | Ep {epoch}: Val Acc improved ({val_acc:.2f}%) but rejected by Loss-Gate Safeguard "
-                        f"(Val Loss {val_loss:.4f} > {max_allowed_loss:.4f} [min: {min_val_loss:.4f}])."
-                    )
-                    early_stop_counter += 1
-                else:
-                    best_val_acc = val_acc
-                    best_epoch = epoch
-                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                    early_stop_counter = 0
+            metrics_snapshot = {
+                "train_loss": train_loss,
+                "train_accuracy": train_acc,
+                "val_loss": val_loss,
+                "val_accuracy": val_acc,
+            }
+            current_metric = (
+                val_acc
+                if self.config.checkpoint.monitor == "val_accuracy"
+                else val_loss
+            )
+            accepted = checkpoint_manager.save_if_best(
+                model=model,
+                current_metric=current_metric,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                metrics=metrics_snapshot,
+                history=history,
+            )
+            if accepted:
+                early_stop_counter = 0
             else:
                 early_stop_counter += 1
 
             self.logger.info(
                 f"Fold {fold_num} | Ep {epoch:02d}/{cfg.epochs:02d} | "
                 f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}% | Best: {best_val_acc:.2f}% (Ep {best_epoch})"
+                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}% | "
+                f"Accepted: {checkpoint_manager.best_value:.2f} "
+                f"(Ep {checkpoint_manager.best_epoch})"
             )
 
             if early_stop_counter >= cfg.early_stopping_patience:
@@ -553,20 +727,12 @@ class OOFGenerator:
                 )
                 break
 
-        # Load best weights
-        if best_state is not None:
-            model.load_state_dict(best_state)
-
-        # Save fold checkpoint
-        torch.save(
-            {
-                "epoch": best_epoch,
-                "best_value": best_val_acc,
-                "model_state_dict": model.state_dict(),
-                "history": history,
-            },
-            os.path.join(fold_dir, "best_model.pth"),
-        )
+        if checkpoint_manager.best_epoch is None:
+            raise RuntimeError(
+                f"Fold {fold_num} completed without an accepted checkpoint"
+            )
+        best_checkpoint = checkpoint_manager.load_best(device=str(self.device))
+        model.load_state_dict(best_checkpoint["model_state_dict"])
 
         # Save history CSV, JSON & plots
         history_df = pd.DataFrame({
@@ -583,12 +749,43 @@ class OOFGenerator:
             json.dump(history, f, indent=2)
         plot_training_curves(history, fold_dir, model_name=f"{self.config.model.name} Fold {fold_num}")
 
-        # Compute validation predictions and full metrics
-        val_probs = self._predict(model, val_loader)
-        np.save(os.path.join(fold_dir, "val_probabilities.npy"), val_probs)
+        return model
 
-        val_preds = np.argmax(val_probs, axis=1)
-        metrics = compute_metrics(val_labels, val_preds, class_names=class_names)
+    def _evaluate_outer_holdout(
+        self,
+        frozen_model: nn.Module,
+        outer_holdout_loader: DataLoader,
+        outer_holdout_labels: np.ndarray,
+        outer_holdout_sample_ids: np.ndarray,
+        class_names: List[str],
+        fold_idx: int,
+        fold_dir: str,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Run inference-only evaluation on a fold after its checkpoint is frozen."""
+        fold_num = fold_idx + 1
+        outer_holdout_probs = self._predict(frozen_model, outer_holdout_loader)
+        np.save(
+            os.path.join(fold_dir, "outer_holdout_probabilities.npy"),
+            outer_holdout_probs,
+        )
+        save_prediction_artifact(
+            os.path.join(fold_dir, "outer_holdout_predictions.npz"),
+            sample_ids=outer_holdout_sample_ids,
+            y_true=outer_holdout_labels,
+            probabilities=outer_holdout_probs,
+            predictions=np.argmax(outer_holdout_probs, axis=1),
+            class_order=class_names,
+            protocol="oof",
+            method=self.config.model.name,
+            split="outer_holdout",
+        )
+
+        outer_holdout_preds = np.argmax(outer_holdout_probs, axis=1)
+        metrics = compute_metrics(
+            outer_holdout_labels,
+            outer_holdout_preds,
+            class_names=class_names,
+        )
 
         with open(os.path.join(fold_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump({k: v for k, v in metrics.items() if k != "classification_report"}, f, indent=2)
@@ -611,20 +808,15 @@ class OOFGenerator:
             model_name=f"Fold {fold_num}", filename="per_class_metrics.png"
         )
         plot_roc_curves(
-            val_labels, val_probs, class_names, fold_dir,
+            outer_holdout_labels, outer_holdout_probs, class_names, fold_dir,
             model_name=f"Fold {fold_num}", filename="roc_curves.png"
         )
         plot_precision_recall_curves(
-            val_labels, val_probs, class_names, fold_dir,
+            outer_holdout_labels, outer_holdout_probs, class_names, fold_dir,
             model_name=f"Fold {fold_num}", filename="precision_recall_curves.png"
         )
 
-        test_probs_fold = None
-        if test_loader is not None:
-            test_probs_fold = self._predict(model, test_loader)
-            np.save(os.path.join(fold_dir, "test_probabilities.npy"), test_probs_fold)
-
-        return val_probs, metrics, test_probs_fold
+        return outer_holdout_probs, metrics
 
     @torch.no_grad()
     def _validate_epoch(
