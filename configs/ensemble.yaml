@@ -1,0 +1,35 @@
+# Canonical ensemble configuration for FINAL_V2 scientific experiments.
+base_model_order:
+  - densenet121
+  - efficientnet_b0
+  - resnet50
+  - swin_tiny
+
+weighted_voting:
+  method: SLSQP
+  objective: multiclass_log_loss
+  epsilon: 1.0e-12
+  max_iterations: 1000
+  ftol: 1.0e-12
+
+stacking:
+  logistic_regression:
+    solver: lbfgs
+    max_iter: 1000
+    C: 1.0
+    penalty: l2
+    random_state: 42
+  random_forest:
+    n_estimators: 200
+    max_depth: null
+    random_state: 42
+    n_jobs: -1
+  xgboost:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.1
+    random_state: 42
+    objective: multi:softprob
+    num_class: 6
+    eval_metric: mlogloss
+

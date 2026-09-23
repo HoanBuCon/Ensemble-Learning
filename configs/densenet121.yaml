@@ -49,7 +49,7 @@ train:
   label_smoothing: 0.1
 
 checkpoint:
-  save_dir: ./RESULTS/DEFAULT_TRAINING/outputs/densenet121
+  save_dir: ./RESULTS/FINAL_V2/single_split/densenet121
   save_best: true
   save_last: true
   monitor: val_accuracy

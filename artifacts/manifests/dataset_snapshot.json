@@ -1,0 +1,52 @@
+{
+  "class_counts": {
+    "test": {
+      "Brown_Blight": 207,
+      "Gray_Blight": 345,
+      "Green_mirid_bug": 193,
+      "Healthy_leaf": 345,
+      "Helopeltis": 242,
+      "Tea_algal_leaf_spot": 214
+    },
+    "train": {
+      "Brown_Blight": 962,
+      "Gray_Blight": 1607,
+      "Green_mirid_bug": 897,
+      "Healthy_leaf": 1610,
+      "Helopeltis": 1124,
+      "Tea_algal_leaf_spot": 992
+    },
+    "validation": {
+      "Brown_Blight": 206,
+      "Gray_Blight": 344,
+      "Green_mirid_bug": 192,
+      "Healthy_leaf": 345,
+      "Helopeltis": 241,
+      "Tea_algal_leaf_spot": 212
+    }
+  },
+  "class_order": [
+    "Brown_Blight",
+    "Gray_Blight",
+    "Green_mirid_bug",
+    "Healthy_leaf",
+    "Helopeltis",
+    "Tea_algal_leaf_spot"
+  ],
+  "class_to_idx": {
+    "Brown_Blight": 0,
+    "Gray_Blight": 1,
+    "Green_mirid_bug": 2,
+    "Healthy_leaf": 3,
+    "Helopeltis": 4,
+    "Tea_algal_leaf_spot": 5
+  },
+  "created_at": "2026-09-23T18:10:42.959505+00:00",
+  "dataset_policy": "HUMAN-APPROVED FROZEN INPUT DATASET",
+  "manifest_sha256": "a94426015d83a3b8e9f66a30bddee9e4b376eaf509f166aa522d7a204fe22dc5",
+  "test_samples": 1546,
+  "total_samples": 10278,
+  "train_samples": 7192,
+  "validation_directory": "valid",
+  "validation_samples": 1540
+}
