@@ -150,10 +150,10 @@ Use `python main.py` as the primary interface for all commands:
 python main.py serve                            # Starts server on http://127.0.0.1:8000
 python server.py                                # Alternative direct entrypoint
 
-# ⭐️ 1. Full End-to-End Pipeline (Train All Base -> Report -> Ensemble)
-python main.py all-in-one                       # Interactive prompt for val vs oof mode
-python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
-python main.py all-in-one --ensemble-mode oof   # Full 5-Fold OOF mode (~10-13 hrs)
+# 1. Full End-to-End Pipeline (Single-Split -> OOF -> Ensembles -> Verification)
+python main.py all-in-one --run-id paper-v1 --train-mode scratch
+python main.py all-in-one --run-id paper-v1 --train-mode resume --start-at oof
+# Outputs are bound to RESULTS/runs/<run_id>/; no latest-run discovery is used.
 
 # 2. Train & Evaluate ALL Base Models Only (No Ensemble)
 python main.py train-all                 # Default: auto-detect & skip completed models
@@ -346,10 +346,10 @@ Sử dụng `python main.py` làm giao diện chính duy nhất cho mọi lệnh
 python main.py serve                            # Chạy server tại http://127.0.0.1:8000
 python server.py                                # Hoặc chạy trực tiếp file server.py
 
-# ⭐️ 1. Lệnh All-in-One chạy trọn gói Pipeline (Train Base -> Báo cáo Base -> Đánh giá Ensemble)
-python main.py all-in-one                       # Chọn mode val/oof qua giao diện menu tương tác
-python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
-python main.py all-in-one --ensemble-mode oof   # Full 5-Fold OOF mode (~10-13 hrs)
+# 1. All-in-One: Single-Split -> OOF -> Ensembles -> Verification
+python main.py all-in-one --run-id paper-v1 --train-mode scratch
+python main.py all-in-one --run-id paper-v1 --train-mode resume --start-at oof
+# Kết quả được khóa tại RESULTS/runs/<run_id>/; không tự tìm run "latest".
 
 # 2. Train & Đánh giá TẤT CẢ mô hình Base (Không chạy Ensemble)
 python main.py train-all                 # Mặc định: tự động phát hiện & skip mô hình đã train xong

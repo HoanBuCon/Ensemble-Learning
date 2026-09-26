@@ -8,7 +8,7 @@ and generating comparison reports & plots.
 
 CLI Commands::
 
-    python main.py all-in-one
+    python main.py all-in-one --run-id paper-v1 --train-mode scratch
     python main.py train configs/resnet50.yaml
     python main.py evaluate configs/resnet50.yaml --split test
     python main.py benchmark --mode auto
@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 # Ensure project root directory is in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +95,107 @@ def canonical_protocol_from_mode(mode: str) -> str:
     raise ValueError(f"Unknown ensemble mode: {mode}")
 
 
+END_TO_END_PHASES = (
+    "single-train",
+    "single-ensemble",
+    "oof",
+    "verification",
+)
+
+
+def run_end_to_end_pipeline(
+    *,
+    config_paths: Sequence[str],
+    train_mode: str,
+    run_id: str,
+    results_root: str = "RESULTS",
+    start_at: str = "single-train",
+    stop_after: str = "verification",
+    force_retrain_oof: bool = False,
+    skip_tsne: bool = False,
+) -> None:
+    """Run the complete FINAL pipeline in one explicit, resumable phase window.
+
+    The same ``run_id`` and ``results_root`` are forwarded to every phase. No
+    phase discovers a latest run. Starting at a later phase is allowed, but
+    downstream readers remain fail-closed when required artifacts are absent.
+    """
+    from src.utils.run_identity import validate_run_id
+
+    run_id = validate_run_id(run_id)
+    if train_mode not in {"scratch", "resume"}:
+        raise ValueError("all-in-one train_mode must be 'scratch' or 'resume'")
+    if start_at not in END_TO_END_PHASES:
+        raise ValueError(f"Unknown start phase: {start_at}")
+    if stop_after not in END_TO_END_PHASES:
+        raise ValueError(f"Unknown stop phase: {stop_after}")
+
+    start_index = END_TO_END_PHASES.index(start_at)
+    stop_index = END_TO_END_PHASES.index(stop_after)
+    if start_index > stop_index:
+        raise ValueError("--start-at must not occur after --stop-after")
+
+    selected_configs = list(config_paths)
+    registered_configs = resolve_config_paths(None)
+    if selected_configs != registered_configs:
+        raise ValueError(
+            "all-in-one requires the complete registered backbone set in canonical "
+            f"order: {registered_configs}"
+        )
+
+    def enabled(phase: str) -> bool:
+        index = END_TO_END_PHASES.index(phase)
+        return start_index <= index <= stop_index
+
+    phase_labels = {
+        "single-train": "SINGLE-SPLIT BASE TRAINING",
+        "single-ensemble": "SINGLE-SPLIT CANONICAL ENSEMBLE",
+        "oof": "5-FOLD OOF TRAINING AND CANONICAL ENSEMBLE",
+        "verification": "SCIENTIFIC VERIFICATION REPLAY",
+    }
+    active_phases = [phase for phase in END_TO_END_PHASES if enabled(phase)]
+
+    for position, phase in enumerate(active_phases, 1):
+        print("\n" + "=" * 80)
+        print(
+            f"  END-TO-END PHASE {position}/{len(active_phases)}: "
+            f"{phase_labels[phase]}"
+        )
+        print(f"  RUN ID: {run_id} | RESULTS ROOT: {results_root}")
+        print("=" * 80 + "\n")
+
+        if phase == "single-train":
+            run_experiments(
+                selected_configs,
+                mode=train_mode,
+                run_id=run_id,
+                results_root=results_root,
+            )
+        elif phase == "single-ensemble":
+            run_ensemble_evaluation(
+                protocol="single_split",
+                results_root=results_root,
+                run_id=run_id,
+            )
+        elif phase == "oof":
+            run_all_kfold_experiments(
+                config_paths=selected_configs,
+                n_splits=5,
+                split_seed=42,
+                force_retrain=force_retrain_oof,
+                eval_ensemble=True,
+                run_id=run_id,
+                results_root=results_root,
+            )
+        elif phase == "verification":
+            run_verification_suite(
+                results_root,
+                None,
+                skip_tsne,
+                run_id=run_id,
+            )
+
+
 def dispatch_verification_task(
     task: str,
     *,
@@ -145,10 +246,10 @@ evaluating checkpoints, running multi-model benchmarks, performing Ensemble Lear
 
 EXAMPLES & COMMON WORKFLOWS:
 
-  1. Run Full End-to-End Pipeline (Train Base -> Report -> Ensemble):
-     $ python main.py all-in-one                       # Interactive prompt for val vs oof mode
-     $ python main.py all-in-one --ensemble-mode val   # Fast validation mode (~30s)
-     $ python main.py all-in-one --ensemble-mode oof   # Full 5-Fold OOF mode (~10-13 hrs)
+  1. Run Full End-to-End Pipeline (Single -> OOF -> Verification):
+     $ python main.py all-in-one --run-id paper-v1 --train-mode scratch
+     $ python main.py all-in-one --run-id paper-v1 --train-mode resume
+     $ python main.py all-in-one --run-id paper-v1 --train-mode resume --start-at oof
 
   2. Train & Evaluate ALL Base Models Only (No Ensemble):
      $ python main.py train-all                 # Default: auto-detect & skip completed models
@@ -197,28 +298,44 @@ ENSEMBLE PROTOCOLS EXPLAINED:
     pipe_parser = subparsers.add_parser(
         "all-in-one",
         aliases=["pipeline", "full-pipeline"],
-        help="Run full end-to-end pipeline: Train all base models -> Base report -> Ensemble evaluation",
+        help="Run complete pipeline: Single-Split -> OOF -> canonical ensembles -> verification",
     )
     pipe_parser.add_argument(
         "--configs",
         nargs="*",
         default=None,
-        help="List of YAML config files (default: all configs/*.yaml)",
+        help="Complete registered backbone config list (default: canonical four)",
     )
     pipe_parser.add_argument(
         "--train-mode",
-        choices=["scratch", "resume", "auto"],
-        default="auto",
-        help="Training mode: 'scratch', 'resume', or 'auto'",
-    )
-    pipe_parser.add_argument(
-        "--ensemble-mode",
-        choices=["val", "oof"],
-        default=None,
-        help="Ensemble protocol: 'val' (Single-Split) or 'oof' (5-Fold CV). Prompts interactively if omitted.",
+        choices=["scratch", "resume"],
+        default="scratch",
+        help="Single-Split training mode (default: scratch)",
     )
     pipe_parser.add_argument("--run-id", required=True)
     pipe_parser.add_argument("--results-root", default="RESULTS")
+    pipe_parser.add_argument(
+        "--start-at",
+        choices=END_TO_END_PHASES,
+        default="single-train",
+        help="First phase to execute; inputs from earlier phases must already exist",
+    )
+    pipe_parser.add_argument(
+        "--stop-after",
+        choices=END_TO_END_PHASES,
+        default="verification",
+        help="Last phase to execute (default: verification)",
+    )
+    pipe_parser.add_argument(
+        "--force-retrain-oof",
+        action="store_true",
+        help="Ignore compatible OOF caches and retrain all folds",
+    )
+    pipe_parser.add_argument(
+        "--skip-tsne",
+        action="store_true",
+        help="Skip t-SNE during the final verification phase",
+    )
 
     # 2. Train All Base Models Subcommand (No Ensemble)
     bench_parser = subparsers.add_parser(
@@ -459,7 +576,7 @@ def run_interactive_cli_menu() -> None:
     run_id = validate_run_id(run_id)
     results_root = "RESULTS"
     menu_options = [
-        "🚀 Run Full End-to-End Pipeline (Train Base -> Report -> Ensemble)",
+        "🚀 Run Full End-to-End Pipeline (Single -> OOF -> Verification)",
         "🏋️ Train a Single Backbone Model (ResNet-50 / DenseNet-121 / EfficientNet-B0 / Swin-Tiny)",
         "⚡ Run Ensemble Benchmark Evaluation (Voting & Stacking Meta-Learners)",
         "🔁 Run 5-Fold Cross Validation (Single Backbone or All Backbones)",
@@ -479,27 +596,21 @@ def run_interactive_cli_menu() -> None:
             )
 
             if choice_idx == 0:
-                train_mode = prompt_base_models_training(run_id, results_root)
-                ensemble_mode = prompt_ensemble_mode()
+                mode_index = select_menu_option(
+                    [
+                        "Fresh scientific run (scratch)",
+                        "Continue the same run_id from checkpoints/caches (resume)",
+                    ],
+                    "SELECT END-TO-END TRAINING MODE",
+                )
+                train_mode = "scratch" if mode_index == 0 else "resume"
                 config_paths = resolve_config_paths(None)
-                print("\n" + "=" * 80)
-                print(f"  STEP 1/3: BASE MODELS BENCHMARK & REPORT GENERATION (MODE: {train_mode.upper()})")
-                print("=" * 80 + "\n")
-                run_experiments(
-                    config_paths, mode=train_mode, run_id=run_id,
+                run_end_to_end_pipeline(
+                    config_paths=config_paths,
+                    train_mode=train_mode,
+                    run_id=run_id,
                     results_root=results_root,
                 )
-                print("\n" + "=" * 80)
-                print(f"  STEP 2/3: ENSEMBLE EVALUATION PIPELINE (MODE: {ensemble_mode.upper()})")
-                print("=" * 80 + "\n")
-                run_ensemble_evaluation(
-                    protocol=canonical_protocol_from_mode(ensemble_mode),
-                    results_root=results_root, run_id=run_id,
-                )
-                print("\n" + "=" * 80)
-                print("  STEP 3/3: SCIENTIFIC VERIFICATION & CALIBRATION SUITE")
-                print("=" * 80 + "\n")
-                run_verification_suite(results_root, None, False, run_id=run_id)
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 1:
@@ -663,30 +774,15 @@ def main() -> None:
 
     elif args.command in ["all-in-one", "pipeline", "full-pipeline"]:
         config_paths = resolve_config_paths(args.configs)
-        train_mode = args.train_mode
-        ensemble_mode = prompt_ensemble_mode(args.ensemble_mode)
-
-        print("\n" + "=" * 80)
-        print(f"  STEP 1/3: BASE MODELS BENCHMARK & REPORT GENERATION (MODE: {train_mode.upper()})")
-        print("=" * 80 + "\n")
-        run_experiments(
-            config_paths, mode=train_mode, run_id=args.run_id,
+        run_end_to_end_pipeline(
+            config_paths=config_paths,
+            train_mode=args.train_mode,
+            run_id=args.run_id,
             results_root=args.results_root,
-        )
-
-        print("\n" + "=" * 80)
-        print(f"  STEP 2/3: ENSEMBLE EVALUATION PIPELINE (MODE: {ensemble_mode.upper()})")
-        print("=" * 80 + "\n")
-        run_ensemble_evaluation(
-            protocol=canonical_protocol_from_mode(ensemble_mode),
-            results_root=args.results_root, run_id=args.run_id,
-        )
-
-        print("\n" + "=" * 80)
-        print("  STEP 3/3: SCIENTIFIC VERIFICATION & CALIBRATION SUITE")
-        print("=" * 80 + "\n")
-        run_verification_suite(
-            args.results_root, None, False, run_id=args.run_id
+            start_at=args.start_at,
+            stop_after=args.stop_after,
+            force_retrain_oof=args.force_retrain_oof,
+            skip_tsne=args.skip_tsne,
         )
 
 

@@ -121,6 +121,92 @@ class Step4BRemediationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown ensemble mode"):
             main.canonical_protocol_from_mode("latest")
 
+        pipeline = parser.parse_args([
+            "all-in-one", "--run-id", "run-a", "--train-mode", "scratch",
+        ])
+        self.assertEqual(pipeline.results_root, "RESULTS")
+        self.assertEqual(pipeline.start_at, "single-train")
+        self.assertEqual(pipeline.stop_after, "verification")
+        self.assertFalse(hasattr(pipeline, "ensemble_mode"))
+
+    def test_all_in_one_runs_complete_pipeline_in_canonical_order(self) -> None:
+        configs = [
+            "configs/resnet50.yaml",
+            "configs/densenet121.yaml",
+            "configs/efficientnet_b0.yaml",
+            "configs/swin_tiny.yaml",
+        ]
+        calls = []
+
+        with patch.object(main, "resolve_config_paths", return_value=configs), patch.object(
+            main, "run_experiments", side_effect=lambda *a, **k: calls.append(("single-train", a, k))
+        ) as train, patch.object(
+            main, "run_ensemble_evaluation", side_effect=lambda *a, **k: calls.append(("single-ensemble", a, k))
+        ) as single_ensemble, patch.object(
+            main, "run_all_kfold_experiments", side_effect=lambda *a, **k: calls.append(("oof", a, k))
+        ) as oof, patch.object(
+            main, "run_verification_suite", side_effect=lambda *a, **k: calls.append(("verification", a, k))
+        ) as verify:
+            main.run_end_to_end_pipeline(
+                config_paths=configs,
+                train_mode="scratch",
+                run_id="run-a",
+                results_root="RESULTS",
+                skip_tsne=True,
+            )
+
+        self.assertEqual([entry[0] for entry in calls], list(main.END_TO_END_PHASES))
+        train.assert_called_once_with(
+            configs, mode="scratch", run_id="run-a", results_root="RESULTS"
+        )
+        single_ensemble.assert_called_once_with(
+            protocol="single_split", results_root="RESULTS", run_id="run-a"
+        )
+        oof.assert_called_once_with(
+            config_paths=configs,
+            n_splits=5,
+            split_seed=42,
+            force_retrain=False,
+            eval_ensemble=True,
+            run_id="run-a",
+            results_root="RESULTS",
+        )
+        verify.assert_called_once_with("RESULTS", None, True, run_id="run-a")
+
+    def test_all_in_one_phase_window_does_not_repeat_completed_training(self) -> None:
+        configs = [
+            "configs/resnet50.yaml",
+            "configs/densenet121.yaml",
+            "configs/efficientnet_b0.yaml",
+            "configs/swin_tiny.yaml",
+        ]
+        with patch.object(main, "resolve_config_paths", return_value=configs), patch.object(
+            main, "run_experiments"
+        ) as train, patch.object(main, "run_ensemble_evaluation") as ensemble, patch.object(
+            main, "run_all_kfold_experiments"
+        ) as oof, patch.object(main, "run_verification_suite") as verify:
+            main.run_end_to_end_pipeline(
+                config_paths=configs,
+                train_mode="resume",
+                run_id="run-a",
+                start_at="oof",
+                stop_after="verification",
+            )
+
+        train.assert_not_called()
+        ensemble.assert_not_called()
+        oof.assert_called_once()
+        verify.assert_called_once()
+
+        with self.assertRaisesRegex(ValueError, "start-at"):
+            main.run_end_to_end_pipeline(
+                config_paths=configs,
+                train_mode="resume",
+                run_id="run-a",
+                start_at="verification",
+                stop_after="single-train",
+            )
+
     def test_provenance_rejects_uncommitted_scientific_source(self) -> None:
         with patch(
             "src.utils.provenance.git_identity",
