@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 
 from src.datasets.transforms import build_transforms
-from src.utils.config import ExperimentConfig
+from src.utils.config import ExperimentConfig, load_dataset_config
 from src.utils.reproducibility import get_generator, seed_worker
 
 
@@ -110,15 +110,10 @@ def create_dataloaders(
         root=os.path.join(config.data.root, "train"),
         transform=train_transform,
     )
-    # Support both 'val' and 'valid' folder names
-    val_dir = os.path.join(config.data.root, "val")
+    dataset_config = load_dataset_config()
+    val_dir = str(dataset_config.get("val_dir", ""))
     if not os.path.isdir(val_dir):
-        val_dir = os.path.join(config.data.root, "valid")
-    if not os.path.isdir(val_dir):
-        raise FileNotFoundError(
-            f"Validation directory not found at '{os.path.join(config.data.root, 'val')}' "
-            f"or '{os.path.join(config.data.root, 'valid')}'"
-        )
+        raise FileNotFoundError(f"Configured validation directory not found: {val_dir}")
 
     val_dataset = ImageFolderDataset(
         root=val_dir,

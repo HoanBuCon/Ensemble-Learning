@@ -209,7 +209,7 @@ def _package_version(distribution: str) -> Optional[str]:
         return None
 
 
-def git_identity(project_root: os.PathLike[str] | str = ".") -> Dict[str, Optional[str]]:
+def git_identity(project_root: os.PathLike[str] | str = ".") -> Dict[str, Any]:
     def run(*args: str) -> Optional[str]:
         try:
             return subprocess.check_output(
@@ -218,10 +218,35 @@ def git_identity(project_root: os.PathLike[str] | str = ".") -> Dict[str, Option
         except (OSError, subprocess.CalledProcessError):
             return None
 
+    status = run("status", "--porcelain", "--untracked-files=all")
+    scientific_changes: List[str] = []
+    if status:
+        for line in status.splitlines():
+            candidate = line[3:].split(" -> ")[-1].replace("\\", "/")
+            if candidate in {"main.py", "server.py", "requirements.txt"} or candidate.startswith(
+                ("configs/", "scripts/", "src/")
+            ):
+                scientific_changes.append(candidate)
     return {
         "git_commit": run("rev-parse", "HEAD"),
         "git_branch": run("branch", "--show-current"),
+        "scientific_worktree_changes": scientific_changes,
     }
+
+
+def require_git_commit(project_root: os.PathLike[str] | str = ".") -> str:
+    """Return a full source commit or fail rather than inventing provenance."""
+    identity = git_identity(project_root)
+    commit = identity.get("git_commit")
+    if commit is None or len(commit) != 40:
+        raise RuntimeError("A full Git source commit is required for scientific artifacts")
+    changes = identity.get("scientific_worktree_changes") or []
+    if changes:
+        raise RuntimeError(
+            "Scientific source/config must be committed before artifact generation: "
+            + ", ".join(changes)
+        )
+    return commit
 
 
 def runtime_identity() -> Dict[str, Any]:
@@ -288,13 +313,14 @@ def write_experiment_manifest(
     dataset_snapshot_path: os.PathLike[str] | str = "artifacts/manifests/dataset_snapshot.json",
     arguments: Optional[Dict[str, Any]] = None,
     project_root: os.PathLike[str] | str = ".",
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Persist a complete provenance record for a new FINAL_V2 run."""
+    """Persist a complete provenance record for a new scientific run."""
     config = Path(config_path)
     checkpoint = Path(checkpoint_path) if checkpoint_path else None
     prediction = Path(prediction_path) if prediction_path else None
     payload: Dict[str, Any] = {
-        "run_id": f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}",
+        "run_id": str(run_id) if run_id else f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}",
         "created_at": utc_now_iso(),
         "protocol": protocol,
         "model": model,
@@ -314,4 +340,3 @@ def write_experiment_manifest(
     }
     write_json(output_path, payload)
     return payload
-

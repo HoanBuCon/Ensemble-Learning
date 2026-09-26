@@ -1,4 +1,4 @@
-"""Fail-closed orchestration for FINAL_V2 scientific verification replay."""
+"""Fail-closed orchestration for scientific verification replay."""
 
 from __future__ import annotations
 
@@ -19,37 +19,41 @@ from scripts.verification.eval_latency_throughput import run_hardware_benchmark
 from scripts.verification.eval_mcnemar_test import run_mcnemar_analysis
 from scripts.verification.eval_tsne import run_tsne_analysis
 from src.utils.provenance import verify_dataset_snapshot, write_json
+from scripts.verification.common_utils import resolve_verification_output_dir
 
 
 def run_full_scientific_verification(
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
     skip_tsne: bool = False,
+    run_id: str = "",
 ) -> None:
     """Replay final predictions and fitted artifacts; any missing input is fatal."""
     verify_dataset_snapshot()
-    output = Path(save_dir) if save_dir else Path(results_root) / "verification"
-    output.mkdir(parents=True, exist_ok=True)
+    from src.utils.run_identity import validate_run_id
+    run_id = validate_run_id(run_id)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
 
-    calibration = evaluate_all_calibration(results_root, str(output))
-    diversity = evaluate_diversity(results_root, str(output))
-    mcnemar, mcnemar_summary = run_mcnemar_analysis(results_root, str(output))
-    advanced = evaluate_advanced_metrics(results_root, str(output))
+    calibration = evaluate_all_calibration(results_root, str(output), run_id=run_id)
+    diversity = evaluate_diversity(results_root, str(output), run_id=run_id)
+    mcnemar, mcnemar_summary = run_mcnemar_analysis(results_root, str(output), run_id=run_id)
+    advanced = evaluate_advanced_metrics(results_root, str(output), run_id=run_id)
     latency_single = run_hardware_benchmark(
-        "single_split", results_root, save_dir=str(output)
+        "single_split", results_root, save_dir=str(output), run_id=run_id
     )
-    latency_oof = run_hardware_benchmark("oof", results_root, save_dir=str(output))
+    latency_oof = run_hardware_benchmark("oof", results_root, save_dir=str(output), run_id=run_id)
     tsne_outputs = []
     if not skip_tsne:
         for protocol in ("single_split", "oof"):
             run_tsne_analysis(
                 "probability_vector", protocol, results_root, str(output)
+                , run_id=run_id
             )
             tsne_outputs.append(f"tsne_{protocol}_probability_vector_metadata.json")
 
     report_path = output / "FULL_SCIENTIFIC_VERIFICATION_REPORT.md"
     with report_path.open("w", encoding="utf-8") as handle:
-        handle.write("# FINAL_V2 Scientific Verification Replay\n\n")
+        handle.write("# Scientific Verification Replay\n\n")
         handle.write(
             "All tables below were computed from saved, identity-checked prediction "
             "artifacts. Verification did not fit or reconstruct an ensemble.\n\n"
@@ -74,6 +78,7 @@ def run_full_scientific_verification(
         output / "verification_manifest.json",
         {
             "results_root": results_root,
+            "run_id": run_id,
             "report": str(report_path),
             "mcnemar_family_alpha": mcnemar_summary["family_alpha"],
             "mcnemar_family_size": mcnemar_summary["bonferroni_family_size"],
@@ -85,11 +90,12 @@ def run_full_scientific_verification(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Replay FINAL_V2 verification")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser = argparse.ArgumentParser(description="Replay scientific verification")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
     parser.add_argument("--skip-tsne", action="store_true")
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     run_full_scientific_verification(
-        args.results_root, args.save_dir, args.skip_tsne
+        args.results_root, args.save_dir, args.skip_tsne, args.run_id
     )

@@ -1,4 +1,4 @@
-"""Benchmark real FINAL_V2 checkpoint and fitted-ensemble pipelines."""
+"""Benchmark real checkpoint and fitted-ensemble pipelines."""
 
 from __future__ import annotations
 
@@ -18,12 +18,13 @@ import pandas as pd
 import torch
 import yaml
 
-from scripts.verification.common_utils import base_model_order, verification_output_dir
+from scripts.verification.common_utils import base_model_order, resolve_verification_output_dir
 from src.ensemble.stacking import StackingEnsemble
 from src.ensemble.voting import WeightedVoting
 from src.models.factory import create_model
 from src.utils.config import load_config
 from src.utils.provenance import runtime_identity, write_json
+from src.utils.run_identity import final_run_root, validate_run_id
 
 
 class FoldAveragedModel(torch.nn.Module):
@@ -38,8 +39,8 @@ class FoldAveragedModel(torch.nn.Module):
         return torch.stack(probabilities, dim=0).mean(dim=0)
 
 
-def _checkpoint_paths(results_root: str, protocol: str, model_name: str) -> List[Path]:
-    root = Path(results_root) / protocol / model_name
+def _checkpoint_paths(results_root: str, run_id: str, protocol: str, model_name: str) -> List[Path]:
+    root = final_run_root(results_root, run_id) / protocol / model_name
     if protocol == "single_split":
         paths = [root / "best_model.pth"]
     elif protocol == "oof":
@@ -57,9 +58,10 @@ def _load_family(
     protocol: str,
     model_name: str,
     device: torch.device,
+    run_id: str,
 ) -> Tuple[FoldAveragedModel, List[Path]]:
     config = load_config(f"configs/{model_name}.yaml")
-    paths = _checkpoint_paths(results_root, protocol, model_name)
+    paths = _checkpoint_paths(results_root, run_id, protocol, model_name)
     models = []
     for path in paths:
         model = create_model(
@@ -164,14 +166,16 @@ def _ensemble_operation(
 
 def run_hardware_benchmark(
     protocol: str,
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     benchmark_config: str = "configs/final_experiment.yaml",
     save_dir: Optional[str] = None,
+    run_id: str = "",
 ) -> pd.DataFrame:
+    run_id = validate_run_id(run_id)
     with open(benchmark_config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)["latency"]
     order = base_model_order()
-    artifact_dir = Path(results_root) / protocol / "ensembles" / "ensemble_artifacts"
+    artifact_dir = final_run_root(results_root, run_id) / protocol / "ensembles" / "ensemble_artifacts"
     required_artifacts = [
         artifact_dir / "weighted_voting.json",
         artifact_dir / "stacking_lr.joblib",
@@ -198,7 +202,7 @@ def run_hardware_benchmark(
         families: Dict[str, FoldAveragedModel] = {}
         checkpoint_paths: Dict[str, List[Path]] = {}
         for model_name in order:
-            family, paths = _load_family(results_root, protocol, model_name, device)
+            family, paths = _load_family(results_root, protocol, model_name, device, run_id)
             families[model_name] = family
             checkpoint_paths[model_name] = paths
 
@@ -219,7 +223,7 @@ def run_hardware_benchmark(
             path.stat().st_size for paths in checkpoint_paths.values() for path in paths
         )
         methods = [
-            "soft_voting", "weighted_voting", "stacking_logistic_regression",
+            "hard_voting", "soft_voting", "weighted_voting", "stacking_logistic_regression",
             "stacking_random_forest", "stacking_xgboost",
         ]
         for method in methods:
@@ -246,12 +250,13 @@ def run_hardware_benchmark(
             torch.cuda.empty_cache()
 
     frame = pd.DataFrame(rows)
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / f"latency_{protocol}.csv", index=False)
     environment = runtime_identity()
     environment.update({
         "protocol": protocol,
+        "run_id": run_id,
         "dtype": "float32",
         "batch_size": int(config["batch_size"]),
         "input_shape": config["input_shape"],
@@ -296,9 +301,12 @@ def _row(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark real FINAL_V2 pipelines")
+    parser = argparse.ArgumentParser(description="Benchmark real saved scientific pipelines")
     parser.add_argument("--protocol", required=True, choices=["single_split", "oof"])
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    run_hardware_benchmark(args.protocol, args.results_root, save_dir=args.save_dir)
+    run_hardware_benchmark(
+        args.protocol, args.results_root, save_dir=args.save_dir, run_id=args.run_id
+    )

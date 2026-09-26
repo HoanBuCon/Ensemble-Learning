@@ -7,7 +7,7 @@
 <a name="english"></a>
 ## English
 
-Enterprise-grade PyTorch research framework designed for image classification, Ensemble Learning research (Hard Voting, Soft Voting, Weighted Voting, Stacking), and real-time multi-image REST API deployment. Built with modular architecture, strict reproducibility, full configuration drive, and clean decoupled Web Architecture for academic research, thesis work, and web deployment.
+PyTorch research framework for image classification and ensemble evaluation. Results are shown only when provenance-linked run artifacts are available; exact runtime and reproducibility claims depend on those artifacts.
 
 > 📖 **Detailed Architecture & Codebase Documentation**: See [docs/codebase_documentation.md](docs/codebase_documentation.md) for full module breakdowns, data flows, REST API endpoints, and technical specifications.
 
@@ -29,7 +29,7 @@ Enterprise-grade PyTorch research framework designed for image classification, E
 - **Scientific Verification & Calibration Suite (`scripts/verification/` & `python main.py verify`)**:
   - Probability Calibration: Expected Calibration Error (ECE, 15 bins), Multi-class Brier Score, and Negative Log-Likelihood (NLL).
   - Model Diversity & Continuous Probability Vector Ambiguity ($\bar{A}_{\text{prob}}$) as per Krogh & Vedelsby (1995).
-  - Cross-Protocol Paired Hypothesis Testing Matrix: Exhaustive McNemar paired tests for all 6 Ensemble methods comparing Single-Split vs. 5-Fold OOF with Edwards' Chi-Square, Exact Two-Sided Binomial $p$-values, Bonferroni multiple testing correction ($\alpha = 0.0083$), Risk Difference ($95\%$ CI), Cohen's $h$ effect sizes, and statistical power.
+  - Cross-Protocol Paired Hypothesis Testing Matrix: six same-method comparisons with exact paired p-values and a dynamically derived Bonferroni threshold; failure to reject is not equivalence.
   - Hardware Efficiency & Inference Latency Benchmark (GPU/CPU Latency, FPS, Model Memory & Params).
   - Latent Feature Space t-SNE 2D Manifold Quality (Silhouette Score, Davies-Bouldin Index, Calinski-Harabasz).
   - Automated report generation exporting comprehensive CSV, JSON, and Markdown summary files (`FULL_SCIENTIFIC_VERIFICATION_REPORT.md`).
@@ -227,11 +227,11 @@ Khung nghiên cứu PyTorch cấp doanh nghiệp (Enterprise-grade) phục vụ 
   - Hard Voting (Bầu chọn theo đa số)
   - Soft Voting (Trung bình cộng xác suất)
   - Weighted Voting (Tối ưu hóa trọng số tự động bằng SLSQP)
-  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) kết hợp với bộ tạo Out-of-Fold (OOF) $7,192 \times 24$ để chống rò rỉ dữ liệu.
+  - Stacking Ensemble (Logistic Regression, Random Forest, XGBoost) dùng ma trận OOF $N_{train} \times 24$ với outer holdout chỉ dành cho inference.
 - **Bộ Công cụ Kiểm định Khoa học Toàn diện (`scripts/verification/` & `python main.py verify`)**:
   - Đo lường Hiệu chuẩn Xác suất: Expected Calibration Error (ECE 15 bins), Brier Score, Negative Log-Likelihood (NLL).
   - Đo lường Độ đa dạng Mô hình & Phân rã Ambiguity ($\bar{A}_{\text{prob}}$) theo định lý Krogh & Vedelsby (1995).
-  - Ma trận Kiểm định Chéo McNemar Toàn diện: So sánh từng cặp cho toàn bộ 6 phương pháp Ensemble giữa Single-Split và 5-Fold OOF, kèm Risk Difference ($95\%$ CI), Effect Size Cohen's $h$, hiệu chỉnh Bonferroni ($\alpha = 0.0083$) và Statistical Power.
+  - Ma trận McNemar liên giao thức: sáu so sánh cùng phương pháp với ngưỡng Bonferroni được tính từ số phép kiểm định; không diễn giải không bác bỏ như bằng chứng tương đương.
   - Đánh giá Phân tách Không gian Ẩn t-SNE 2D (Silhouette Score, Davies-Bouldin, Calinski-Harabasz).
   - Đo đạc Hiệu năng Phần cứng: Độ trễ Latency (ms), Tốc độ Throughput (FPS) trên CPU/GPU, Dung lượng MB và Số lượng Tham số.
   - Tự động xuất báo cáo tổng hợp Master: `FULL_SCIENTIFIC_VERIFICATION_REPORT.md`.

@@ -20,13 +20,13 @@ Run server:
 
 from __future__ import annotations
 
-import glob
 import io
 import json
 import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
 import albumentations as A
@@ -48,6 +48,8 @@ if PROJECT_ROOT not in sys.path:
 from src.models.factory import create_model, list_models
 from src.ensemble import HardVoting, SoftVoting, WeightedVoting, StackingEnsemble
 from src.utils.config import load_config, load_dataset_config
+from src.utils.run_identity import final_run_root, validate_protocol, validate_run_id
+from src.utils.provenance import load_dataset_manifest_sha256, require_git_commit, sha256_file
 
 DATASET_CONFIG = load_dataset_config()
 DEFAULT_CLASS_NAMES = DATASET_CONFIG.get("classes", [
@@ -64,18 +66,18 @@ ENSEMBLE_KEYS = [
     "hard_voting",
     "soft_voting",
     "weighted_voting",
-    "stacking_logistic",
-    "stacking_rf",
-    "stacking_xgb",
+    "stacking_logistic_regression",
+    "stacking_random_forest",
+    "stacking_xgboost",
 ]
 
 ENSEMBLE_DISPLAY_NAMES = {
     "hard_voting": "Hard Voting (Majority Vote)",
     "soft_voting": "Soft Voting (Probability Averaging)",
     "weighted_voting": "Weighted Voting Ensemble",
-    "stacking_logistic": "Stacking (Logistic Regression)",
-    "stacking_rf": "Stacking (Random Forest)",
-    "stacking_xgb": "Stacking (XGBoost)",
+    "stacking_logistic_regression": "Stacking (Logistic Regression)",
+    "stacking_random_forest": "Stacking (Random Forest)",
+    "stacking_xgboost": "Stacking (XGBoost)",
 }
 
 BASE_DISPLAY_NAMES = {
@@ -100,6 +102,50 @@ app.add_middleware(
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+RESULTS_ROOT = os.path.join(PROJECT_ROOT, "RESULTS")
+RESULTS_RUN_ID = os.environ.get("RESULTS_RUN_ID", "").strip()
+
+
+def normalize_request_protocol(protocol: str) -> str:
+    aliases = {"single": "single_split", "val": "single_split", "single_split": "single_split", "oof": "oof", "5fold": "oof"}
+    normalized = aliases.get(str(protocol).lower())
+    if normalized is None:
+        raise ValueError(f"Unsupported protocol: {protocol}")
+    return validate_protocol(normalized)
+
+
+def configured_run_root() -> str:
+    if not RESULTS_RUN_ID:
+        raise RuntimeError("RESULTS_RUN_ID is required; latest-run discovery is disabled")
+    return str(final_run_root(RESULTS_ROOT, validate_run_id(RESULTS_RUN_ID)))
+
+
+def validate_checkpoint_manifest(
+    manifest_path: str,
+    checkpoint_path: str,
+    *,
+    protocol: str,
+    model_name: str,
+    fold: Optional[int] = None,
+) -> None:
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(f"Checkpoint provenance manifest missing: {manifest_path}")
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    expected = {
+        "run_id": validate_run_id(RESULTS_RUN_ID),
+        "protocol": protocol,
+        "model": model_name,
+        "dataset_manifest_sha256": load_dataset_manifest_sha256(),
+        "config_sha256": sha256_file(f"configs/{model_name}.yaml"),
+        "git_commit": require_git_commit(),
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+    }
+    if fold is not None:
+        expected["fold"] = fold
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ValueError(f"Checkpoint provenance mismatch at {key}: {manifest_path}")
 
 # Global Cache for Dual Protocols (Single-Split & 5-Fold OOF)
 BASE_MODELS_SINGLE: Dict[str, torch.nn.Module] = {}
@@ -108,37 +154,11 @@ BASE_MODELS_OOF: Dict[str, List[torch.nn.Module]] = {}
 ENSEMBLE_MODELS_SINGLE: Dict[str, Any] = {}
 ENSEMBLE_MODELS_OOF: Dict[str, Any] = {}
 
-# Backward compatible pointer (defaults to OOF if loaded, else Single)
-BASE_MODELS: Dict[str, torch.nn.Module] = {}
-ENSEMBLE_MODELS: Dict[str, Any] = {}
-
 CLASS_NAMES: List[str] = DEFAULT_CLASS_NAMES
 LOADED_MODEL_INFO: Dict[str, Dict[str, str]] = {
     "single": {},
     "oof": {},
 }
-
-
-def get_possible_output_dirs() -> List[str]:
-    """Return prioritized list of output directories across all protocols."""
-    candidates = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING", "outputs"),
-        os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING"),
-        os.path.join(PROJECT_ROOT, "RESULTS"),
-        os.path.join(PROJECT_ROOT, "outputs"),
-        os.path.join(PROJECT_ROOT, "Default_Result_V2", "outputs"),
-        os.path.join(PROJECT_ROOT, "Default_Results", "outputs"),
-        os.path.join(PROJECT_ROOT, "OOF_Results", "outputs"),
-    ]
-    seen = set()
-    result = []
-    for d in candidates:
-        if os.path.isdir(d) and d not in seen:
-            seen.add(d)
-            result.append(d)
-    return result
 
 
 def get_preprocess_transform(image_size: int = 224) -> A.Compose:
@@ -147,43 +167,6 @@ def get_preprocess_transform(image_size: int = 224) -> A.Compose:
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])
-
-
-def find_single_model_checkpoint(name: str, search_dirs: List[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Find standalone single-split checkpoint for a base model."""
-    for out_dir in search_dirs:
-        possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{name}*")))
-        for d in possible_dirs:
-            direct_pth = os.path.join(d, "best_model.pth")
-            cmap_path = os.path.join(d, "class_to_idx.json")
-            cmap = cmap_path if os.path.exists(cmap_path) else None
-            if os.path.exists(direct_pth):
-                return direct_pth, cmap, "Single Split Checkpoint"
-    return None, None, None
-
-
-def find_oof_fold_checkpoints(name: str, search_dirs: List[str]) -> Tuple[List[str], Optional[str]]:
-    """Find all 5 fold checkpoints for 5-Fold Cross Validation."""
-    for out_dir in search_dirs:
-        possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{name}*")))
-        for d in possible_dirs:
-            kfold_dir = os.path.join(d, "kfold")
-            if os.path.isdir(kfold_dir):
-                cmap_path = os.path.join(kfold_dir, "class_to_idx.json")
-                if not os.path.exists(cmap_path):
-                    cmap_path = os.path.join(d, "class_to_idx.json")
-                cmap = cmap_path if os.path.exists(cmap_path) else None
-
-                fold_dirs = sorted(glob.glob(os.path.join(kfold_dir, "fold_*")))
-                fold_pths = []
-                for f in fold_dirs:
-                    pth = os.path.join(f, "best_model.pth")
-                    if os.path.exists(pth):
-                        fold_pths.append(pth)
-
-                if fold_pths:
-                    return fold_pths, cmap
-    return [], None
 
 
 def update_class_names_from_cmap(cmap_path: Optional[str]):
@@ -200,7 +183,7 @@ def update_class_names_from_cmap(cmap_path: Optional[str]):
 
 def load_all_base_models():
     """Load and cache both Single-Split and 5-Fold OOF base models."""
-    global CLASS_NAMES, BASE_MODELS_SINGLE, BASE_MODELS_OOF, BASE_MODELS, LOADED_MODEL_INFO
+    global CLASS_NAMES, BASE_MODELS_SINGLE, BASE_MODELS_OOF, LOADED_MODEL_INFO
     BASE_MODELS_SINGLE.clear()
     BASE_MODELS_OOF.clear()
     LOADED_MODEL_INFO["single"].clear()
@@ -210,20 +193,25 @@ def load_all_base_models():
     print(f"   SCANNING & LOADING BASE MODELS: DUAL PROTOCOL (Device: {DEVICE})")
     print(f"{'='*75}")
 
-    single_root = os.path.join(PROJECT_ROOT, "RESULTS", "FINAL_V2", "single_split")
+    run_root = configured_run_root()
+    single_root = os.path.join(run_root, "single_split")
     if os.path.isdir(single_root):
         for name in BASE_MODEL_KEYS:
             weights_path = os.path.join(single_root, name, "best_model.pth")
             if not os.path.isfile(weights_path):
-                raise FileNotFoundError(f"Incomplete FINAL_V2 single-split models: {weights_path}")
+                raise FileNotFoundError(f"Incomplete scientific single-split models: {weights_path}")
+            validate_checkpoint_manifest(
+                os.path.join(single_root, name, "experiment_manifest.json"),
+                weights_path, protocol="single_split", model_name=name,
+            )
             model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
             checkpoint = torch.load(weights_path, map_location=DEVICE, weights_only=False)
             model.load_state_dict(checkpoint["model_state_dict"])
             model.to(DEVICE).eval()
             BASE_MODELS_SINGLE[name] = model
-            LOADED_MODEL_INFO["single"][name] = "FINAL_V2 single_split"
+            LOADED_MODEL_INFO["single"][name] = "scientific single_split"
 
-    oof_root = os.path.join(PROJECT_ROOT, "RESULTS", "FINAL_V2", "oof")
+    oof_root = os.path.join(run_root, "oof")
     if os.path.isdir(oof_root):
         for name in BASE_MODEL_KEYS:
             fold_paths = [
@@ -232,46 +220,59 @@ def load_all_base_models():
             ]
             missing = [path for path in fold_paths if not os.path.isfile(path)]
             if missing:
-                raise FileNotFoundError(f"Incomplete FINAL_V2 OOF models: {missing}")
+                raise FileNotFoundError(f"Incomplete scientific OOF models: {missing}")
             fold_models = []
             for path in fold_paths:
+                fold = int(Path(path).parent.name.split("_")[-1])
+                validate_checkpoint_manifest(
+                    os.path.join(os.path.dirname(path), "experiment_manifest.json"),
+                    path, protocol="oof", model_name=name, fold=fold,
+                )
                 model = create_model(model_name=name, pretrained=False, num_classes=len(CLASS_NAMES))
                 checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
                 model.load_state_dict(checkpoint["model_state_dict"])
                 model.to(DEVICE).eval()
                 fold_models.append(model)
             BASE_MODELS_OOF[name] = fold_models
-            LOADED_MODEL_INFO["oof"][name] = "FINAL_V2 five-fold mean"
-
-    # Set default BASE_MODELS pointer to OOF if available (for 5-fold averaging), else Single
-    BASE_MODELS.clear()
-    if BASE_MODELS_OOF:
-        BASE_MODELS.update(BASE_MODELS_SINGLE if BASE_MODELS_SINGLE else {})
-    else:
-        BASE_MODELS.update(BASE_MODELS_SINGLE)
+            LOADED_MODEL_INFO["oof"][name] = "scientific five-fold mean"
 
     total_oof_models = sum(len(v) for v in BASE_MODELS_OOF.values())
     print(f"\n[MODEL LOADER SUMMARY] Single Models: {len(BASE_MODELS_SINGLE)}/4 | 5-Fold OOF Models: {total_oof_models}/20\n")
 
 
 def init_ensemble_models():
-    """Load canonical fitted FINAL_V2 ensembles; never refit in the server."""
-    global ENSEMBLE_MODELS_SINGLE, ENSEMBLE_MODELS_OOF, ENSEMBLE_MODELS
+    """Load canonical fitted scientific ensembles; never refit in the server."""
+    global ENSEMBLE_MODELS_SINGLE, ENSEMBLE_MODELS_OOF
     ENSEMBLE_MODELS_SINGLE.clear()
     ENSEMBLE_MODELS_OOF.clear()
 
     def load_protocol(protocol: str) -> Dict[str, Any]:
         artifact_dir = os.path.join(
-            PROJECT_ROOT, "RESULTS", "FINAL_V2", protocol,
+            configured_run_root(), protocol,
             "ensembles", "ensemble_artifacts",
         )
         if not os.path.isdir(artifact_dir):
             return {}
+        manifest_path = os.path.join(artifact_dir, "ensemble_manifest.json")
+        if not os.path.isfile(manifest_path):
+            raise FileNotFoundError(f"Ensemble manifest missing: {manifest_path}")
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if (
+            manifest.get("run_id") != RESULTS_RUN_ID
+            or manifest.get("protocol") != protocol
+            or manifest.get("dataset_manifest_sha256") != load_dataset_manifest_sha256()
+            or manifest.get("ensemble_config_sha256") != sha256_file("configs/ensemble.yaml")
+            or manifest.get("source_commit") != require_git_commit()
+            or manifest.get("base_model_order") != BASE_MODEL_KEYS
+            or manifest.get("class_order") != CLASS_NAMES
+        ):
+            raise ValueError(f"Ensemble provenance identity mismatch: {manifest_path}")
         required = {
             "weighted_voting": "weighted_voting.json",
-            "stacking_logistic": "stacking_lr.joblib",
-            "stacking_rf": "stacking_rf.joblib",
-            "stacking_xgb": "stacking_xgb.json",
+            "stacking_logistic_regression": "stacking_lr.joblib",
+            "stacking_random_forest": "stacking_rf.joblib",
+            "stacking_xgboost": "stacking_xgb.json",
         }
         missing = [
             filename for filename in required.values()
@@ -281,38 +282,47 @@ def init_ensemble_models():
             raise FileNotFoundError(
                 f"Incomplete {protocol} ensemble artifacts: {missing}"
             )
+        manifest_artifacts = manifest.get("model_artifact_hashes")
+        expected_artifacts = {
+            "weighted_voting": "weighted_voting.json",
+            "stacking_logistic_regression": "stacking_lr.joblib",
+            "stacking_random_forest": "stacking_rf.joblib",
+            "stacking_xgboost": "stacking_xgb.json",
+        }
+        if not isinstance(manifest_artifacts, dict):
+            raise ValueError(f"Ensemble artifact hashes missing: {manifest_path}")
+        for method, filename in expected_artifacts.items():
+            actual_hash = sha256_file(os.path.join(artifact_dir, filename))
+            if manifest_artifacts.get(method) != actual_hash:
+                raise ValueError(
+                    f"Ensemble artifact hash mismatch for {method}: {manifest_path}"
+                )
         return {
             "hard_voting": HardVoting(),
             "soft_voting": SoftVoting(),
             "weighted_voting": WeightedVoting.load(
                 os.path.join(artifact_dir, required["weighted_voting"])
             ),
-            "stacking_logistic": StackingEnsemble("logistic_regression").load(
-                os.path.join(artifact_dir, required["stacking_logistic"])
+            "stacking_logistic_regression": StackingEnsemble("logistic_regression").load(
+                os.path.join(artifact_dir, required["stacking_logistic_regression"])
             ),
-            "stacking_rf": StackingEnsemble("random_forest").load(
-                os.path.join(artifact_dir, required["stacking_rf"])
+            "stacking_random_forest": StackingEnsemble("random_forest").load(
+                os.path.join(artifact_dir, required["stacking_random_forest"])
             ),
-            "stacking_xgb": StackingEnsemble("xgboost").load(
-                os.path.join(artifact_dir, required["stacking_xgb"])
+            "stacking_xgboost": StackingEnsemble("xgboost").load(
+                os.path.join(artifact_dir, required["stacking_xgboost"])
             ),
         }
 
     ENSEMBLE_MODELS_SINGLE.update(load_protocol("single_split"))
     ENSEMBLE_MODELS_OOF.update(load_protocol("oof"))
 
-    # Set default pointer
-    ENSEMBLE_MODELS.clear()
-    if ENSEMBLE_MODELS_OOF:
-        ENSEMBLE_MODELS.update(ENSEMBLE_MODELS_OOF)
-    elif ENSEMBLE_MODELS_SINGLE:
-        ENSEMBLE_MODELS.update(ENSEMBLE_MODELS_SINGLE)
-
 
 @app.on_event("startup")
 def startup_event():
-    load_all_base_models()
-    init_ensemble_models()
+    if RESULTS_RUN_ID:
+        load_all_base_models()
+        init_ensemble_models()
 
 
 def process_image_bytes(image_bytes: bytes, transform: A.Compose) -> torch.Tensor:
@@ -332,9 +342,12 @@ def compute_base_probabilities(batch_tensor: torch.Tensor, protocol: str = "oof"
       - 'oof': 5-Fold Cross Validation model averaging across 20 fold models (5 folds per backbone)
       - 'single': Standalone single-split checkpoint evaluation (4 backbones)
     """
+    protocol = normalize_request_protocol(protocol)
     base_probs = {}
     with torch.no_grad():
-        if protocol in ["oof", "5fold"] and BASE_MODELS_OOF:
+        if protocol == "oof":
+            if not BASE_MODELS_OOF:
+                raise RuntimeError("OOF protocol requested but OOF base models are unavailable")
             for name in BASE_MODEL_KEYS:
                 if name not in BASE_MODELS_OOF:
                     raise RuntimeError(f"Missing OOF base model family: {name}")
@@ -342,7 +355,9 @@ def compute_base_probabilities(batch_tensor: torch.Tensor, protocol: str = "oof"
                 probs_stacked = [torch.softmax(f_m(batch_tensor), dim=1) for f_m in fold_models]
                 mean_probs = torch.mean(torch.stack(probs_stacked), dim=0).cpu().numpy()
                 base_probs[name] = mean_probs
-        else:
+        elif protocol == "single_split":
+            if not BASE_MODELS_SINGLE:
+                raise RuntimeError("Single-split protocol requested but single-split base models are unavailable")
             # Single-Split Protocol
             for name in BASE_MODEL_KEYS:
                 if name not in BASE_MODELS_SINGLE:
@@ -359,8 +374,9 @@ def compute_ensemble_predictions(
     """
     Compute ensemble predictions for a specific ensemble method under the selected protocol.
     """
+    protocol = normalize_request_protocol(protocol)
     target_ensembles = (
-        ENSEMBLE_MODELS_OOF if protocol in ["oof", "5fold"]
+        ENSEMBLE_MODELS_OOF if protocol == "oof"
         else ENSEMBLE_MODELS_SINGLE
     )
     if not target_ensembles:
@@ -375,8 +391,9 @@ def compute_ensemble_predictions(
         hv = target_ensembles.get("hard_voting")
         if hv is None:
             raise RuntimeError("Hard Voting artifact identity is unavailable")
-        preds = hv.predict(probs_list)
-        return preds, None
+        probs = hv.predict_proba(probs_list)
+        preds = np.argmax(probs, axis=1)
+        return preds, probs
 
     elif ensemble_key == "soft_voting":
         sv = target_ensembles.get("soft_voting")
@@ -394,7 +411,9 @@ def compute_ensemble_predictions(
             return preds, probs
         raise RuntimeError("Weighted Voting artifact is missing")
 
-    elif ensemble_key in ["stacking_logistic", "stacking_rf", "stacking_xgb"]:
+    elif ensemble_key in [
+        "stacking_logistic_regression", "stacking_random_forest", "stacking_xgboost"
+    ]:
         st = target_ensembles.get(ensemble_key)
         if st is not None:
             probs = st.predict_proba(probs_list)
@@ -417,14 +436,14 @@ def get_pipeline_config():
             "single": {
                 "available": has_single,
                 "name": "Single-Split Mode (Standalone Backbones)",
-                "description": "4 Standalone Models + Meta-Learners fit on 1,540 Validation samples",
+                "description": "Standalone checkpoints plus meta-learners fit on the configured validation split",
                 "base_models_count": len(BASE_MODELS_SINGLE),
                 "ensemble_models_count": len(ENSEMBLE_MODELS_SINGLE),
             },
             "oof": {
                 "available": has_oof,
                 "name": "5-Fold Cross Validation (OOF Protocol)",
-                "description": f"5 Folds Averaged ({total_oof_models} Models) + Meta-Learners fit on 7,192 OOF samples",
+                "description": f"Five-fold probability averaging ({total_oof_models} loaded checkpoints) plus cross-fitted meta-learners",
                 "base_models_count": total_oof_models,
                 "ensemble_models_count": len(ENSEMBLE_MODELS_OOF),
             }
@@ -479,7 +498,7 @@ async def predict(
     if not BASE_MODELS_SINGLE and not BASE_MODELS_OOF:
         raise HTTPException(
             status_code=500,
-            detail="No base models loaded from RESULTS/DEFAULT_TRAINING or RESULTS/OOF_TRAINING."
+            detail="No base models loaded for the configured scientific run identity."
         )
 
     transform = get_preprocess_transform(image_size=224)
@@ -505,6 +524,8 @@ async def predict(
     num_samples = len(valid_filenames)
 
     active_protocol = protocol.lower() if protocol else "oof"
+    if active_protocol not in {"single", "single_split", "val", "oof", "5fold", "dual", "both", "all"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported protocol: {active_protocol}")
     run_protocols = ["single", "oof"] if active_protocol in ["dual", "both", "all"] else [active_protocol]
 
     predictions_by_file = []
@@ -530,14 +551,18 @@ async def predict(
 
         if mode_type == "single_base":
             target = selected_model or "resnet50"
-            run_base_keys.append(target if target in BASE_MODEL_KEYS else "resnet50")
+            if target not in BASE_MODEL_KEYS:
+                raise HTTPException(status_code=400, detail=f"Unknown base model: {target}")
+            run_base_keys.append(target)
 
         elif mode_type == "all_base":
             run_base_keys = list(BASE_MODEL_KEYS)
 
         elif mode_type == "single_ensemble":
             target = selected_model or "soft_voting"
-            run_ensemble_keys.append(target if target in ENSEMBLE_KEYS else "soft_voting")
+            if target not in ENSEMBLE_KEYS:
+                raise HTTPException(status_code=400, detail=f"Unknown ensemble method: {target}")
+            run_ensemble_keys.append(target)
 
         elif mode_type == "all_ensemble":
             run_ensemble_keys = list(ENSEMBLE_KEYS)
@@ -545,6 +570,8 @@ async def predict(
         elif mode_type == "all_all":
             run_base_keys = list(BASE_MODEL_KEYS)
             run_ensemble_keys = list(ENSEMBLE_KEYS)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown inference mode: {mode_type}")
 
         # Generate predictions for each protocol
         for proto in run_protocols:
@@ -674,9 +701,10 @@ def get_analytics(protocol: Optional[str] = "oof"):
     Loads 100% dynamically from evaluated verification and output artifacts.
     """
     ds_cfg = load_dataset_config()
-    target_protocol = "oof" if protocol in ["oof", "5fold"] else "val"
-    target_sub = "oof" if target_protocol == "oof" else "val"
-    proto_label = "5-Fold OOF" if target_protocol == "oof" else "Single-Split"
+    canonical_protocol = normalize_request_protocol(protocol or "oof")
+    target_protocol = "oof" if canonical_protocol == "oof" else "val"
+    target_sub = canonical_protocol
+    protocol_identity = canonical_protocol
 
     analytics_data = {
         "status": "success",
@@ -697,19 +725,27 @@ def get_analytics(protocol: Optional[str] = "oof"):
             "latency_table": [],
             "global_disagreement_single": "",
             "global_disagreement_oof": "",
-            "ambiguity_single": 0.0,
-            "ambiguity_oof": 0.0,
+            "ambiguity_single": None,
+            "ambiguity_oof": None,
             "ambiguity_ratio": "",
             "mcnemar": {},
             "discordant_samples": []
         }
     }
 
-    # 1. Dynamically Load Verification Artifacts from RESULTS/verification or outputs/verification
-    verif_dirs = [
-        os.path.join(PROJECT_ROOT, "RESULTS", "verification"),
-        os.path.join(PROJECT_ROOT, "outputs", "verification"),
-    ]
+    protocol_root = (
+        os.path.join(configured_run_root(), canonical_protocol)
+        if RESULTS_RUN_ID else None
+    )
+    if not protocol_root or not os.path.isdir(protocol_root):
+        analytics_data["status"] = "no_final_v2_result"
+        analytics_data["message"] = "No provenance-linked result available"
+        return analytics_data
+
+    # Load only provenance-linked verification artifacts for the configured run.
+    verif_dirs = []
+    if RESULTS_RUN_ID:
+        verif_dirs.append(os.path.join(configured_run_root(), "verification"))
     calib_records = []
     adv_records = []
     div_records = []
@@ -753,12 +789,15 @@ def get_analytics(protocol: Optional[str] = "oof"):
                     pass
 
             # Load Latency Table
-            lat_csv = os.path.join(vd, "latency_benchmark.csv")
-            if os.path.exists(lat_csv) and not lat_records:
+            latency_paths = [
+                os.path.join(vd, "latency_single_split.csv"),
+                os.path.join(vd, "latency_oof.csv"),
+            ]
+            if not lat_records and any(os.path.exists(path) for path in latency_paths):
                 try:
                     import pandas as pd
-                    df_lat = pd.read_csv(lat_csv)
-                    lat_records = df_lat.to_dict(orient="records")
+                    frames = [pd.read_csv(path) for path in latency_paths if os.path.exists(path)]
+                    lat_records = pd.concat(frames, ignore_index=True).to_dict(orient="records")
                     analytics_data["verification"]["latency_table"] = lat_records
                 except Exception:
                     pass
@@ -794,35 +833,39 @@ def get_analytics(protocol: Optional[str] = "oof"):
                 except Exception:
                     pass
 
-    # Summary statistics for diversity / ambiguity
-    analytics_data["verification"]["global_disagreement_single"] = "5.89%"
-    analytics_data["verification"]["global_disagreement_oof"] = "4.20%"
-    analytics_data["verification"]["ambiguity_single"] = 0.013494
-    analytics_data["verification"]["ambiguity_oof"] = 0.006103
-    analytics_data["verification"]["ambiguity_ratio"] = "2.211x"
-
     # Build dynamic lookup for current protocol metrics from loaded tables
+    def _optional_float(value):
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            number = float(str(value).replace("%", "").strip())
+        except (TypeError, ValueError):
+            return None
+        return number if np.isfinite(number) else None
+
     dynamic_calib_lookup = {}
     for r in calib_records:
-        if str(r.get("Protocol", "")).strip().lower() == proto_label.lower():
-            m_name = str(r.get("Model / Ensemble", "")).strip()
+        if str(r.get("Protocol", "")).strip().lower() == protocol_identity:
+            m_name = str(r.get("Method", "")).strip()
             dynamic_calib_lookup[m_name] = {
-                "ece": float(r.get("ECE (15 bins)", 0.0)),
-                "brier": float(r.get("Brier Score", 0.0)),
-                "nll": float(r.get("NLL", 0.0)),
+                "ece": _optional_float(r.get("ECE_15_bins")),
+                "brier": _optional_float(r.get("Brier_score")),
+                "nll": _optional_float(r.get("NLL")),
             }
 
     dynamic_adv_lookup = {}
     for r in adv_records:
-        if str(r.get("Protocol", "")).strip().lower() == proto_label.lower():
-            m_name = str(r.get("Model / Ensemble Method", "")).strip()
+        if str(r.get("Protocol", "")).strip().lower() == protocol_identity:
+            m_name = str(r.get("Method", "")).strip()
             dynamic_adv_lookup[m_name] = {
-                "accuracy": float(str(r.get("Accuracy (%)", "0")).replace("%", "").strip()),
-                "f1_score": float(str(r.get("Macro F1 (%)", "0")).replace("%", "").strip()),
-                "mcc": float(r.get("MCC", 0.0)),
-                "kappa": float(r.get("Cohen's Kappa", 0.0)),
-                "weighted_f1": float(str(r.get("Weighted F1 (%)", "0")).replace("%", "").strip()),
-                "roc_auc": float(r.get("Macro ROC-AUC", 0.0)),
+                "accuracy": _optional_float(r.get("Accuracy")),
+                "precision": _optional_float(r.get("Macro_precision")),
+                "recall": _optional_float(r.get("Macro_recall")),
+                "f1_score": _optional_float(r.get("Macro_F1")),
+                "mcc": _optional_float(r.get("MCC")),
+                "kappa": _optional_float(r.get("Cohens_kappa")),
+                "weighted_f1": _optional_float(r.get("Weighted_F1")),
+                "roc_auc": _optional_float(r.get("Macro_ROC_AUC_OVR")),
             }
 
     def _clean_name(s: str) -> str:
@@ -841,51 +884,33 @@ def get_analytics(protocol: Optional[str] = "oof"):
                 return v
         return {}
 
-    # Prioritize results folders strictly by target protocol
-    if target_protocol == "oof":
-        all_scan_dirs = [
-            os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING", "outputs"),
-            os.path.join(PROJECT_ROOT, "OOF_Results", "outputs"),
-            os.path.join(PROJECT_ROOT, "RESULTS", "OOF_TRAINING"),
-        ]
-    else:
-        all_scan_dirs = [
-            os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING", "outputs"),
-            os.path.join(PROJECT_ROOT, "Default_Result_V2", "outputs"),
-            os.path.join(PROJECT_ROOT, "RESULTS", "DEFAULT_TRAINING"),
-        ]
-    all_scan_dirs = [d for d in all_scan_dirs if os.path.isdir(d)]
+    # Analytics reads only the explicitly configured run/protocol.
+    all_scan_dirs = [protocol_root]
 
     # 2. Scan Base Models Dynamically
     for model_key in BASE_MODEL_KEYS:
         disp_name = BASE_DISPLAY_NAMES.get(model_key, model_key)
         # Check dynamic lookup keys
-        c_entry = find_entry(dynamic_calib_lookup, f"Base Model ({model_key})")
-        if not c_entry:
-            c_entry = find_entry(dynamic_calib_lookup, f"Base Model ({disp_name})")
-        if not c_entry:
-            c_entry = find_entry(dynamic_calib_lookup, disp_name)
+        c_entry = find_entry(dynamic_calib_lookup, model_key)
+        adv_entry = find_entry(dynamic_adv_lookup, model_key)
 
-        adv_entry = find_entry(dynamic_adv_lookup, f"Base Model ({disp_name})")
-        if not adv_entry:
-            adv_entry = find_entry(dynamic_adv_lookup, f"Base Model ({model_key})")
-        if not adv_entry:
-            adv_entry = find_entry(dynamic_adv_lookup, disp_name)
+        def _percentage(value):
+            return round(value * 100.0, 4) if value is not None else None
 
         model_info = {
             "name": disp_name,
             "key": model_key,
-            "accuracy": adv_entry.get("accuracy", 0.0),
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1_score": adv_entry.get("f1_score", 0.0),
-            "weighted_f1": adv_entry.get("weighted_f1", 0.0),
-            "kappa": adv_entry.get("kappa", 0.0),
-            "mcc": adv_entry.get("mcc", 0.0),
-            "roc_auc": adv_entry.get("roc_auc", 0.0),
-            "ece": c_entry.get("ece", 0.0),
-            "brier": c_entry.get("brier", 0.0),
-            "nll": c_entry.get("nll", 0.0),
+            "accuracy": _percentage(adv_entry.get("accuracy")),
+            "precision": _percentage(adv_entry.get("precision")),
+            "recall": _percentage(adv_entry.get("recall")),
+            "f1_score": _percentage(adv_entry.get("f1_score")),
+            "weighted_f1": _percentage(adv_entry.get("weighted_f1")),
+            "kappa": adv_entry.get("kappa"),
+            "mcc": adv_entry.get("mcc"),
+            "roc_auc": adv_entry.get("roc_auc"),
+            "ece": c_entry.get("ece"),
+            "brier": c_entry.get("brier"),
+            "nll": c_entry.get("nll"),
             "per_class": {},
             "history": [],
         }
@@ -894,7 +919,8 @@ def get_analytics(protocol: Optional[str] = "oof"):
         found_history = None
 
         for out_dir in all_scan_dirs:
-            possible_dirs = sorted(glob.glob(os.path.join(out_dir, f"{model_key}*")))
+            exact_dir = os.path.join(out_dir, model_key)
+            possible_dirs = [exact_dir] if os.path.isdir(exact_dir) else []
             for d in possible_dirs:
                 if target_protocol == "oof":
                     mcands = [
@@ -939,19 +965,21 @@ def get_analytics(protocol: Optional[str] = "oof"):
                 break
 
         if found_metrics:
-            if model_info["accuracy"] == 0.0:
-                model_info["accuracy"] = round(found_metrics.get("accuracy", 0) * 100, 2)
-            model_info["precision"] = round(found_metrics.get("precision", 0) * 100, 2)
-            model_info["recall"] = round(found_metrics.get("recall", 0) * 100, 2)
-            if model_info["f1_score"] == 0.0:
-                model_info["f1_score"] = round(found_metrics.get("f1_score", 0) * 100, 2)
+            if model_info["accuracy"] is None and found_metrics.get("accuracy") is not None:
+                model_info["accuracy"] = round(found_metrics["accuracy"] * 100, 2)
+            if model_info["precision"] is None and found_metrics.get("precision") is not None:
+                model_info["precision"] = round(found_metrics["precision"] * 100, 2)
+            if model_info["recall"] is None and found_metrics.get("recall") is not None:
+                model_info["recall"] = round(found_metrics["recall"] * 100, 2)
+            if model_info["f1_score"] is None and found_metrics.get("f1_score") is not None:
+                model_info["f1_score"] = round(found_metrics["f1_score"] * 100, 2)
 
             per_class_raw = found_metrics.get("per_class", {})
             for c_name, c_metrics in per_class_raw.items():
                 model_info["per_class"][c_name] = {
-                    "precision": round(c_metrics.get("precision", 0) * 100, 2),
-                    "recall": round(c_metrics.get("recall", 0) * 100, 2),
-                    "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
+                    "precision": _percentage(c_metrics.get("precision")),
+                    "recall": _percentage(c_metrics.get("recall")),
+                    "f1_score": _percentage(c_metrics.get("f1_score")),
                 }
 
         if found_history:
@@ -983,35 +1011,24 @@ def get_analytics(protocol: Optional[str] = "oof"):
                     for _, row in df_ens.iterrows():
                         method_name = str(row.get("Method", ""))
                         method_type = str(row.get("Type", ""))
-                        if "Ensemble" in method_type or "Stacking" in method_type or "Voting" in method_type:
-                            acc_str = str(row.get("Accuracy", "0")).replace("%", "").strip()
-                            prec_str = str(row.get("Precision", "0")).replace("%", "").strip()
-                            rec_str = str(row.get("Recall", "0")).replace("%", "").strip()
-                            f1_str = str(row.get("F1_Score", "0")).replace("%", "").strip()
-                            imp_str = str(row.get("Improvement", "0")).replace("%", "").replace("+", "").strip()
-
-                            try:
-                                imp_val = float(imp_str) if "Base" not in imp_str else 0.0
-                            except ValueError:
-                                imp_val = 0.0
-
+                        if method_name and method_type.lower() in {"voting", "stacking"}:
                             c_entry = find_entry(dynamic_calib_lookup, method_name)
                             adv_entry = find_entry(dynamic_adv_lookup, method_name)
 
                             analytics_data["ensemble_models"][method_name] = {
                                 "name": method_name,
                                 "type": method_type,
-                                "accuracy": float(acc_str),
-                                "precision": float(prec_str),
-                                "recall": float(rec_str),
-                                "f1_score": float(f1_str),
-                                "improvement": imp_val,
-                                "kappa": adv_entry.get("kappa", 0.0),
-                                "mcc": adv_entry.get("mcc", 0.0),
-                                "roc_auc": adv_entry.get("roc_auc", 0.0),
-                                "ece": c_entry.get("ece", 0.0),
-                                "brier": c_entry.get("brier", 0.0),
-                                "nll": c_entry.get("nll", 0.0),
+                                "accuracy": _percentage(_optional_float(row.get("Accuracy"))),
+                                "precision": _percentage(_optional_float(row.get("Precision"))),
+                                "recall": _percentage(_optional_float(row.get("Recall"))),
+                                "f1_score": _percentage(_optional_float(row.get("F1_Score"))),
+                                "improvement": None,
+                                "kappa": adv_entry.get("kappa"),
+                                "mcc": adv_entry.get("mcc"),
+                                "roc_auc": adv_entry.get("roc_auc"),
+                                "ece": c_entry.get("ece"),
+                                "brier": c_entry.get("brier"),
+                                "nll": c_entry.get("nll"),
                                 "details": str(row.get("Details", "")),
                                 "per_class": {},
                             }
@@ -1036,9 +1053,9 @@ def get_analytics(protocol: Optional[str] = "oof"):
                                 per_cls_dict = {}
                                 for c_name, c_metrics in per_cls_raw.items():
                                     per_cls_dict[c_name] = {
-                                        "precision": round(c_metrics.get("precision", 0) * 100, 2),
-                                        "recall": round(c_metrics.get("recall", 0) * 100, 2),
-                                        "f1_score": round(c_metrics.get("f1_score", 0) * 100, 2),
+                                        "precision": _percentage(c_metrics.get("precision")),
+                                        "recall": _percentage(c_metrics.get("recall")),
+                                        "f1_score": _percentage(c_metrics.get("f1_score")),
                                     }
                                 analytics_data["ensemble_models"][ens_name]["per_class"] = per_cls_dict
                         if any(v.get("per_class") for v in analytics_data["ensemble_models"].values()):

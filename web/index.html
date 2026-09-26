@@ -117,7 +117,7 @@
                     <div class="chart-card chart-card-full">
                         <div class="chart-card-title">
                             <i class="fa-solid fa-table-list" style="color: var(--cyan-color);"></i>
-                            Base Models Exhaustive Benchmark Table (Test Set N = 1,546)
+                            Base Models Benchmark Table
                         </div>
                         <div class="table-responsive">
                             <table class="analytics-table" id="baseModelsTable">
@@ -223,8 +223,8 @@
                             <div class="verif-stat-icon" style="color: var(--success-color);"><i class="fa-solid fa-bullseye"></i></div>
                             <div class="verif-stat-content">
                                 <div class="verif-stat-title">Best Calibrated (ECE)</div>
-                                <div class="verif-stat-value" id="verifBestEce">0.0079 (< 0.8%)</div>
-                                <div class="verif-stat-desc">Stacking Random Forest (OOF)</div>
+                                <div class="verif-stat-value" id="verifBestEce">No provenance-linked result available</div>
+                                <div class="verif-stat-desc">Computed from the selected run</div>
                             </div>
                         </div>
 
@@ -232,8 +232,8 @@
                             <div class="verif-stat-icon" style="color: var(--cyan-color);"><i class="fa-solid fa-chart-pie"></i></div>
                             <div class="verif-stat-content">
                                 <div class="verif-stat-title">Lowest Brier Score</div>
-                                <div class="verif-stat-value" id="verifBestBrier">0.0397</div>
-                                <div class="verif-stat-desc">-41.4% Error vs ResNet-50</div>
+                                <div class="verif-stat-value" id="verifBestBrier">No provenance-linked result available</div>
+                                <div class="verif-stat-desc">Computed from the selected run</div>
                             </div>
                         </div>
 
@@ -241,8 +241,8 @@
                             <div class="verif-stat-icon" style="color: var(--warning-color);"><i class="fa-solid fa-wave-square"></i></div>
                             <div class="verif-stat-content">
                                 <div class="verif-stat-title">Minimum Log-Loss (NLL)</div>
-                                <div class="verif-stat-value" id="verifBestNll">0.0873</div>
-                                <div class="verif-stat-desc">Stacking XGBoost (OOF)</div>
+                                <div class="verif-stat-value" id="verifBestNll">No provenance-linked result available</div>
+                                <div class="verif-stat-desc">Computed from the selected run</div>
                             </div>
                         </div>
 
@@ -250,8 +250,8 @@
                             <div class="verif-stat-icon" style="color: var(--pink-color);"><i class="fa-solid fa-dna"></i></div>
                             <div class="verif-stat-content">
                                 <div class="verif-stat-title">Ambiguity Ratio (A_prob)</div>
-                                <div class="verif-stat-value" id="verifAmbiguityRatio">2.211x</div>
-                                <div class="verif-stat-desc">Single (0.0135) vs OOF (0.0061)</div>
+                                <div class="verif-stat-value" id="verifAmbiguityRatio">No provenance-linked result available</div>
+                                <div class="verif-stat-desc">Computed from the selected run</div>
                             </div>
                         </div>
                     </div>
@@ -301,8 +301,8 @@
                             </table>
                         </div>
                         <div class="diversity-summary-bar">
-                            <span><i class="fa-solid fa-circle-nodes"></i> <strong>Global Disagreement Rate</strong>: Single-Split = <strong id="globDisSingle">5.89%</strong> | 5-Fold OOF = <strong id="globDisOof">4.20%</strong></span>
-                            <span><i class="fa-solid fa-scale-balanced"></i> <strong>Krogh-Vedelsby Ambiguity (A)</strong>: Single-Split = <strong>0.013494</strong> | 5-Fold OOF = <strong>0.006103</strong> (<strong>2.211x Ratio</strong>)</span>
+                            <span><i class="fa-solid fa-circle-nodes"></i> <strong>Global Disagreement Rate</strong>: Single-Split = <strong id="globDisSingle">No provenance-linked result available</strong> | 5-Fold OOF = <strong id="globDisOof">No provenance-linked result available</strong></span>
+                            <span><i class="fa-solid fa-scale-balanced"></i> <strong>Krogh-Vedelsby Ambiguity (A)</strong>: displayed only from provenance-linked verification records.</span>
                         </div>
                     </div>
 
@@ -310,28 +310,28 @@
                     <div class="chart-card chart-card-full">
                         <div class="chart-card-title">
                             <i class="fa-solid fa-scale-unbalanced" style="color: var(--warning-color);"></i>
-                            McNemar Paired Hypothesis Test: Single Soft Voting vs. 5-Fold Hard Voting
+                            McNemar Paired Hypothesis Tests: Same-Method Single-Split vs. 5-Fold OOF
                         </div>
                         
                         <div class="mcnemar-dashboard-grid">
                             <!-- 2x2 Contingency Matrix Card -->
                             <div class="contingency-box">
-                                <div class="contingency-title">2×2 Paired Contingency Matrix (N = 1,546)</div>
+                                <div class="contingency-title">2×2 Paired Contingency Matrix</div>
                                 <div class="contingency-grid">
                                     <div class="contingency-cell correct">
-                                        <div class="c-val" id="cntN11">1,505</div>
+                                        <div class="c-val" id="cntN11">-</div>
                                         <div class="c-lbl">Both Correct (n11)</div>
                                     </div>
                                     <div class="contingency-cell single-win">
-                                        <div class="c-val" id="cntN10">7</div>
+                                        <div class="c-val" id="cntN10">-</div>
                                         <div class="c-lbl">Single Correct, OOF Error (n10)</div>
                                     </div>
                                     <div class="contingency-cell oof-win">
-                                        <div class="c-val" id="cntN01">4</div>
+                                        <div class="c-val" id="cntN01">-</div>
                                         <div class="c-lbl">OOF Correct, Single Error (n01)</div>
                                     </div>
                                     <div class="contingency-cell error">
-                                        <div class="c-val" id="cntN00">30</div>
+                                        <div class="c-val" id="cntN00">-</div>
                                         <div class="c-lbl">Both Error (n00)</div>
                                     </div>
                                 </div>
@@ -342,17 +342,17 @@
                                 <div class="contingency-title">Statistical Test Metrics & Conclusion</div>
                                 <div class="stat-metric-row">
                                     <span>McNemar Chi-Square (Edwards' Correction):</span>
-                                    <strong id="mcnChi2">&chi;² = 0.3636</strong>
+                                    <strong id="mcnChi2">No provenance-linked result available</strong>
                                 </div>
                                 <div class="stat-metric-row">
                                     <span>Exact Two-Sided Binomial Test:</span>
-                                    <strong id="mcnPval">p = 0.5488 (&gg; 0.05)</strong>
+                                    <strong id="mcnPval">No provenance-linked result available</strong>
                                 </div>
                                 <div class="stat-conclusion-badge pass" id="mcnConclusion">
-                                    <i class="fa-solid fa-circle-check"></i> Fail to reject H0 (p > 0.05). No statistically significant difference in error rates.
+                                    <i class="fa-solid fa-circle-info"></i> No provenance-linked result available
                                 </div>
                                 <p class="stat-explanation-text">
-                                    The 3-sample discrepancy (7 vs 4) is fully attributable to test sample variation. Both protocols maintain equivalent classification efficacy while OOF excels in calibration.
+                                    Statistical interpretation is displayed only from provenance-linked verification records.
                                 </p>
                             </div>
                         </div>
@@ -375,8 +375,8 @@
                                             <th>Discordant (n10 / n01)</th>
                                             <th>McNemar &chi;&sup2;</th>
                                             <th>Exact p-value</th>
-                                            <th>Bonferroni (α=0.0083)</th>
-                                            <th>Statistical Power</th>
+                                            <th>Adjusted Decision</th>
+                                            <th>Supplementary Power</th>
                                             <th>Scientific Decision</th>
                                         </tr>
                                     </thead>
@@ -384,7 +384,7 @@
                                 </table>
                             </div>
                             <div class="academic-note-box" style="margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 8px; background: rgba(59, 130, 246, 0.08); border-left: 3px solid #3b82f6; font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;">
-                                <strong><i class="fa-solid fa-circle-info"></i> Academic Notes:</strong> All pairwise comparisons between Single-Split and 5-Fold OOF maintain <em>p > 0.0083</em> after Bonferroni multiple testing correction for 6 simultaneous tests. Observed Cohen's |h| &lt; 0.06 confirms that discrete accuracy discrepancies between protocols are negligible.
+                                <strong><i class="fa-solid fa-circle-info"></i> Academic Notes:</strong> No provenance-linked result available. A failure to reject is not interpreted as equivalence.
                             </div>
                         </div>
                     </div>
@@ -410,11 +410,11 @@
                             <span class="badge" id="inferProtocolBadge">5-Fold OOF (20 Models)</span>
                         </label>
                         <div class="infer-protocol-grid" id="inferProtocolSwitcher">
-                            <button type="button" class="infer-protocol-btn active" data-protocol="oof" title="5-Fold Model Averaging (20 Models) & 7,192 OOF Meta-Learners">
+                            <button type="button" class="infer-protocol-btn active" data-protocol="oof" title="Five-fold probability averaging with cross-fitted meta-learners">
                                 <i class="fa-solid fa-arrows-rotate"></i>
                                 <span>5-Fold OOF</span>
                             </button>
-                            <button type="button" class="infer-protocol-btn" data-protocol="single" title="Single-Split 4 Backbones & 1,540 Val Meta-Learners">
+                            <button type="button" class="infer-protocol-btn" data-protocol="single" title="Single-split backbones with validation-fitted meta-learners">
                                 <i class="fa-solid fa-bolt"></i>
                                 <span>Single-Split</span>
                             </button>
@@ -481,9 +481,9 @@
                                         <div class="custom-dropdown-item selected" data-value="soft_voting">Soft Voting (Probability Averaging)</div>
                                         <div class="custom-dropdown-item" data-value="hard_voting">Hard Voting (Majority Vote)</div>
                                         <div class="custom-dropdown-item" data-value="weighted_voting">Weighted Voting Ensemble</div>
-                                        <div class="custom-dropdown-item" data-value="stacking_logistic">Stacking (Logistic Regression)</div>
-                                        <div class="custom-dropdown-item" data-value="stacking_rf">Stacking (Random Forest)</div>
-                                        <div class="custom-dropdown-item" data-value="stacking_xgb">Stacking (XGBoost)</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_logistic_regression">Stacking (Logistic Regression)</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_random_forest">Stacking (Random Forest)</div>
+                                        <div class="custom-dropdown-item" data-value="stacking_xgboost">Stacking (XGBoost)</div>
                                     </div>
                                     <input type="hidden" id="singleEnsembleSelect" value="soft_voting">
                                 </div>
@@ -537,7 +537,7 @@
 
                 <div id="resultsContainer">
                     <p style="color: var(--text-secondary); text-align: center; padding: 4rem 0;">
-                        Select a mode, upload images, and click "Run Classification Pipeline" to view real-time results.
+                        Select a mode, upload images, and click "Run Classification Pipeline" to view inference results.
                     </p>
                 </div>
             </div>

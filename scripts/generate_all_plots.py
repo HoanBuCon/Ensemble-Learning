@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Ensure project root is in sys.path
@@ -56,6 +57,9 @@ from src.utils.visualization import (
     plot_training_curves,
     plot_training_dashboard,
 )
+from scripts.verification.common_utils import load_protocol_predictions
+from src.utils.provenance import write_json
+from src.utils.run_identity import final_run_root, validate_run_id
 
 
 def get_dataset_class_names() -> List[str]:
@@ -506,8 +510,53 @@ def generate_ensemble_plots(
     print(f"--> All Ensemble visualizations successfully generated in '{mode_dir}' and '{plots_subfolder}'\n")
 
 
-def generate_all_plots(outputs_dir: Optional[str] = None) -> None:
+def _generate_canonical_plots(results_root: str, run_id: str) -> None:
+    """Plot only canonical saved predictions; never fit an estimator."""
+    run_id = validate_run_id(run_id)
+    for protocol in ("single_split", "oof"):
+        base, ensembles = load_protocol_predictions(
+            protocol, results_root=results_root, run_id=run_id
+        )
+        output = final_run_root(results_root, run_id) / protocol / "plots"
+        output.mkdir(parents=True, exist_ok=True)
+        records = {**{f"base_{k}": v for k, v in base.items()}, **ensembles}
+        for method, artifact in records.items():
+            metrics = compute_metrics(
+                artifact.y_true, artifact.predictions,
+                class_names=artifact.class_order.tolist(),
+            )
+            method_dir = output / method
+            method_dir.mkdir(parents=True, exist_ok=True)
+            plot_confusion_matrix(
+                np.asarray(metrics["confusion_matrix"]),
+                artifact.class_order.tolist(), str(method_dir),
+                title=f"{method} ({protocol})", filename="confusion_matrix.png",
+            )
+        latency_path = final_run_root(results_root, run_id) / "verification" / f"latency_{protocol}.csv"
+        write_json(
+            output / "plot_manifest.json",
+            {
+                "run_id": run_id,
+                "protocol": protocol,
+                "prediction_only": True,
+                "ensemble_refit_performed": False,
+                "latency_plot_status": "AVAILABLE" if latency_path.is_file() else "UNAVAILABLE",
+                "latency_source": str(latency_path) if latency_path.is_file() else None,
+            },
+        )
+
+
+def generate_all_plots(
+    outputs_dir: Optional[str] = None,
+    *,
+    run_id: Optional[str] = None,
+) -> None:
     """Master routine to generate all plots across base models and ensembles."""
+    if run_id is not None:
+        _generate_canonical_plots(outputs_dir or "RESULTS", run_id)
+        return
+    if outputs_dir and Path(outputs_dir).name.upper() == "RESULTS":
+        raise ValueError("Canonical RESULTS plotting requires an explicit run_id")
     class_names = get_dataset_class_names()
 
     target_dirs = []
@@ -560,6 +609,7 @@ if __name__ == "__main__":
         default=None,
         help="Main outputs directory (default: scan both RESULTS/DEFAULT_TRAINING and RESULTS/OOF_TRAINING)",
     )
+    parser.add_argument("--run-id", default=None)
     args = parser.parse_args()
 
-    generate_all_plots(outputs_dir=args.outputs_dir)
+    generate_all_plots(outputs_dir=args.outputs_dir, run_id=args.run_id)

@@ -10,7 +10,7 @@ Features:
     - Stratified K-Fold cross validation with deterministic alignment.
     - Full training hyperparameter inheritance from ExperimentConfig (LR, warmup, scheduler, early stopping, AMP, grad clip).
     - Per-fold artifact persistence (best_model.pth, metrics.json, history.csv, confusion matrices, ROC/PR curves).
-    - Fold-level resumption support (skips completed folds on rerun).
+    - Atomic, identity-validated complete-cache reuse; partial caches are rejected.
     - Comprehensive K-Fold summary tables (Mean ± Std) and variance visualization plots.
     - Out-of-fold probability caching for Stacking Meta-Learner training.
 
@@ -18,7 +18,11 @@ Usage::
 
     from src.ensemble.oof import OOFGenerator
 
-    oof_gen = OOFGenerator(config="configs/resnet50.yaml", n_splits=5)
+    oof_gen = OOFGenerator(
+        config="configs/resnet50.yaml", n_splits=5,
+        output_dir="RESULTS/runs/paper-run/oof/resnet50/kfold",
+        run_id="paper-run",
+    )
     oof_probs, oof_labels, test_probs = oof_gen.generate()
 """
 
@@ -43,10 +47,19 @@ from src.datasets.transforms import build_transforms
 from src.ensemble.artifacts import sample_ids_from_paths, save_prediction_artifact
 from src.engine.checkpoint import CheckpointManager
 from src.models.factory import create_model
-from src.utils.config import ExperimentConfig, load_config, load_dataset_config
+from src.utils.config import load_config, load_dataset_config
 from src.utils.logger import CSVLogger, log_training_startup_banner, setup_logger
 from src.utils.metrics import compute_metrics
-from src.utils.provenance import verify_dataset_snapshot, write_experiment_manifest
+from src.utils.provenance import (
+    load_dataset_manifest_sha256,
+    require_git_commit,
+    sha256_file,
+    sha256_text,
+    verify_dataset_snapshot,
+    write_experiment_manifest,
+    write_json,
+)
+from src.utils.run_identity import validate_run_id
 from src.utils.reproducibility import get_generator, seed_worker, set_seed
 from src.utils.visualization import (
     plot_confusion_matrix,
@@ -76,34 +89,28 @@ class OOFGenerator:
 
     def __init__(
         self,
-        config: ExperimentConfig | str,
+        config: str,
         n_splits: int = 5,
         split_seed: int = 42,
-        output_dir: Optional[str] = None,
+        *,
+        output_dir: str,
         force_retrain: bool = False,
+        run_id: str,
     ) -> None:
-        self.config_path = config if isinstance(config, str) else None
-        if isinstance(config, str):
-            config = load_config(config)
+        if not isinstance(config, str):
+            raise TypeError(
+                "Scientific OOF generation requires a config path for immutable identity"
+            )
+        self.config_path = config
+        config = load_config(config)
 
         self.config = config
         self.n_splits = n_splits
         self.split_seed = split_seed
         self.force_retrain = force_retrain
+        self.run_id = validate_run_id(run_id)
         self.device = torch.device(config.device)
-        if output_dir:
-            self.output_dir = output_dir
-        else:
-            base_sd = config.checkpoint.save_dir
-            if "DEFAULT_TRAINING" in base_sd:
-                self.output_dir = os.path.join(base_sd.replace("DEFAULT_TRAINING", "OOF_TRAINING"), "kfold")
-            elif "Default_Result" in base_sd:
-                self.output_dir = os.path.join(base_sd.replace("Default_Result", "OOF_Results"), "kfold")
-            elif base_sd.startswith("./outputs") or base_sd.startswith("outputs"):
-                model_name = getattr(config.model, "name", "model")
-                self.output_dir = os.path.join("RESULTS", "OOF_TRAINING", "outputs", model_name, "kfold")
-            else:
-                self.output_dir = os.path.join(base_sd, "kfold")
+        self.output_dir = output_dir
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -131,7 +138,7 @@ class OOFGenerator:
         }
         name = cfg.optimizer.lower()
         if name not in optimizers:
-            return optimizers["adamw"]()
+            raise ValueError(f"Unknown optimizer '{name}'")
         return optimizers[name]()
 
     def _build_scheduler(
@@ -154,8 +161,25 @@ class OOFGenerator:
         }
         name = cfg.scheduler.lower()
         if name not in schedulers:
-            return schedulers["cosine"]()
+            raise ValueError(f"Unknown scheduler '{name}'")
         return schedulers[name]()
+
+    @staticmethod
+    def validate_cache_identity(actual: Dict[str, Any], expected: Dict[str, Any]) -> None:
+        """Reject an OOF cache on the first precise identity mismatch."""
+        def compare(path: str, left: Any, right: Any) -> None:
+            if isinstance(right, dict):
+                if not isinstance(left, dict):
+                    raise RuntimeError(f"OOF cache identity mismatch at {path}: expected object")
+                for key, value in right.items():
+                    if key not in left:
+                        raise RuntimeError(f"OOF cache identity missing field: {path}.{key}")
+                    compare(f"{path}.{key}", left[key], value)
+            elif left != right:
+                raise RuntimeError(
+                    f"OOF cache identity mismatch at {path}: cached={left!r}, expected={right!r}"
+                )
+        compare("cache", actual, expected)
 
     def generate(self) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
@@ -171,31 +195,13 @@ class OOFGenerator:
         verify_dataset_snapshot()
         if self.config_path is None:
             raise ValueError(
-                "FINAL_V2 OOF provenance requires OOFGenerator(config=<yaml path>)"
+                "Scientific OOF provenance requires OOFGenerator(config=<yaml path>)"
             )
         cfg = self.config
 
         oof_prob_file = os.path.join(self.output_dir, "oof_probabilities.npy")
         oof_lbl_file = os.path.join(self.output_dir, "oof_labels.npy")
         test_prob_file = os.path.join(self.output_dir, "test_probabilities.npy")
-
-        fold_manifests = [
-            os.path.join(self.output_dir, f"fold_{index}", "experiment_manifest.json")
-            for index in range(1, self.n_splits + 1)
-        ]
-        if (
-            not self.force_retrain
-            and os.path.exists(oof_prob_file)
-            and os.path.exists(oof_lbl_file)
-            and os.path.exists(os.path.join(self.output_dir, "oof_predictions.npz"))
-            and all(os.path.exists(path) for path in fold_manifests)
-        ):
-            self.logger.info(f"Existing OOF predictions found in '{self.output_dir}'. Loading cached arrays.")
-            oof_probs = np.load(oof_prob_file)
-            oof_lbls = np.load(oof_lbl_file)
-            test_probs = np.load(test_prob_file) if os.path.exists(test_prob_file) else None
-            return oof_probs, oof_lbls, test_probs
-
         image_size = cfg.data.image_size
         train_transform = build_transforms(
             cfg.augmentation.train, image_size=image_size, stage="train"
@@ -213,16 +219,14 @@ class OOFGenerator:
             transform=val_transform,
         )
 
-        validation_candidates = [
-            os.path.join(cfg.data.root, "val"),
-            os.path.join(cfg.data.root, "valid"),
-        ]
-        validation_dirs = [path for path in validation_candidates if os.path.isdir(path)]
-        if len(validation_dirs) != 1:
+        dataset_config = load_dataset_config()
+        configured_validation = str(dataset_config.get("val_dir", ""))
+        if not configured_validation or not os.path.isdir(configured_validation):
             raise RuntimeError(
-                "OOF training requires exactly one fixed external validation split "
-                f"('data/val' or 'data/valid'); found: {validation_dirs or 'none'}"
+                "OOF training requires the explicit dataset.val_dir to exist: "
+                f"{configured_validation or 'missing'}"
             )
+        validation_dirs = [configured_validation]
         external_val_dataset = ImageFolderDataset(
             root=validation_dirs[0],
             transform=val_transform,
@@ -294,71 +298,97 @@ class OOFGenerator:
         skf = StratifiedKFold(
             n_splits=self.n_splits, shuffle=True, random_state=self.split_seed
         )
+        fold_splits = list(skf.split(np.zeros(num_samples), all_labels))
+        config_sha256 = sha256_file(self.config_path)
+        dataset_manifest_sha256 = load_dataset_manifest_sha256()
+        source_commit = require_git_commit()
+        fold_identity: Dict[str, Any] = {}
+        for fold_idx, (train_indices, holdout_indices) in enumerate(fold_splits):
+            fold_num = fold_idx + 1
+            checkpoint = os.path.join(self.output_dir, f"fold_{fold_num}", "best_model.pth")
+            fold_identity[str(fold_num)] = {
+                "train_indices_sha256": sha256_text(",".join(map(str, train_indices.tolist()))),
+                "holdout_indices_sha256": sha256_text(",".join(map(str, holdout_indices.tolist()))),
+                "checkpoint_sha256": sha256_file(checkpoint) if os.path.isfile(checkpoint) else None,
+            }
+        expected_cache_identity: Dict[str, Any] = {
+            "protocol": "oof",
+            "run_id": self.run_id,
+            "dataset_manifest_sha256": dataset_manifest_sha256,
+            "ordered_sample_ids_sha256": sha256_text("\n".join(all_sample_ids.tolist())),
+            "class_order": list(class_names),
+            "n_splits": self.n_splits,
+            "fold_index_set": list(range(1, self.n_splits + 1)),
+            "folds": fold_identity,
+            "split_seed": self.split_seed,
+            "config_sha256": config_sha256,
+            "backbone": cfg.model.name,
+            "source_commit": source_commit,
+            "cache_artifact_hashes": {
+                "oof_probabilities": sha256_file(oof_prob_file) if os.path.isfile(oof_prob_file) else None,
+                "oof_labels": sha256_file(oof_lbl_file) if os.path.isfile(oof_lbl_file) else None,
+                "oof_predictions": sha256_file(os.path.join(self.output_dir, "oof_predictions.npz"))
+                if os.path.isfile(os.path.join(self.output_dir, "oof_predictions.npz")) else None,
+                "test_probabilities": sha256_file(test_prob_file) if os.path.isfile(test_prob_file) else None,
+                "test_predictions": sha256_file(os.path.join(self.output_dir, "test_predictions.npz"))
+                if os.path.isfile(os.path.join(self.output_dir, "test_predictions.npz")) else None,
+            },
+        }
+        cache_manifest_path = os.path.join(self.output_dir, "oof_cache_manifest.json")
+        fold_required = [
+            os.path.join(self.output_dir, f"fold_{index}", name)
+            for index in range(1, self.n_splits + 1)
+            for name in (
+                "best_model.pth", "metrics.json", "experiment_manifest.json",
+                "outer_holdout_predictions.npz",
+            )
+        ]
+        cache_evidence = [
+            oof_prob_file, oof_lbl_file, test_prob_file,
+            os.path.join(self.output_dir, "oof_predictions.npz"), cache_manifest_path,
+        ] + fold_required
+        if not self.force_retrain and any(os.path.exists(path) for path in cache_evidence):
+            required = [
+                oof_prob_file, oof_lbl_file,
+                os.path.join(self.output_dir, "oof_predictions.npz"),
+                cache_manifest_path,
+            ] + fold_required
+            if test_loader is not None:
+                required.extend([
+                    test_prob_file,
+                    os.path.join(self.output_dir, "test_predictions.npz"),
+                ])
+            missing = [path for path in required if not os.path.isfile(path)]
+            if missing:
+                raise RuntimeError(
+                    "Incomplete OOF cache rejected; use a new run_id or explicit force_retrain: "
+                    + ", ".join(missing)
+                )
+            with open(cache_manifest_path, "r", encoding="utf-8") as handle:
+                cached_identity = json.load(handle)
+            self.validate_cache_identity(cached_identity, expected_cache_identity)
+            self.logger.info("Identity-validated OOF cache accepted")
+            return (
+                np.load(oof_prob_file),
+                np.load(oof_lbl_file),
+                np.load(test_prob_file) if os.path.exists(test_prob_file) else None,
+            )
 
         self.logger.info(
             f"Starting 5-Fold Cross Validation: {self.n_splits} folds, "
             f"{num_samples} samples, {num_classes} classes (Split Seed: {self.split_seed})"
         )
 
-        for fold_idx, (train_indices, outer_holdout_indices) in enumerate(
-            skf.split(np.zeros(num_samples), all_labels)
-        ):
+        for fold_idx, (train_indices, outer_holdout_indices) in enumerate(fold_splits):
             fold_num = fold_idx + 1
             fold_dir = os.path.join(self.output_dir, f"fold_{fold_num}")
             os.makedirs(fold_dir, exist_ok=True)
 
             self.logger.info(f"\n{'='*55}\n  STARTING FOLD {fold_num}/{self.n_splits}\n{'='*55}")
 
-            # Check if this fold was already completed
             fold_prob_path = os.path.join(fold_dir, "outer_holdout_probabilities.npy")
             fold_metrics_path = os.path.join(fold_dir, "metrics.json")
             fold_ckpt_path = os.path.join(fold_dir, "best_model.pth")
-
-            if (
-                not self.force_retrain
-                and os.path.exists(fold_prob_path)
-                and os.path.exists(fold_metrics_path)
-                and os.path.exists(fold_ckpt_path)
-                and os.path.exists(os.path.join(fold_dir, "experiment_manifest.json"))
-            ):
-                self.logger.info(f"Fold {fold_num} already completed. Loading cached results.")
-                fold_probs = np.load(fold_prob_path)
-                if len(fold_probs) != len(outer_holdout_indices):
-                    raise RuntimeError(
-                        f"Fold {fold_num} cached outer-holdout row count does not match "
-                        "the current deterministic split"
-                    )
-                self._place_oof_rows(
-                    oof_probabilities,
-                    oof_assignment_counts,
-                    outer_holdout_indices,
-                    fold_probs,
-                )
-
-                with open(fold_metrics_path, "r", encoding="utf-8") as f:
-                    f_metrics = json.load(f)
-                fold_metrics_list.append({
-                    "Fold": fold_num,
-                    "Accuracy": f_metrics.get("accuracy", 0.0) * 100.0,
-                    "Precision": f_metrics.get("precision", 0.0) * 100.0,
-                    "Recall": f_metrics.get("recall", 0.0) * 100.0,
-                    "F1_Score": f_metrics.get("f1_score", 0.0) * 100.0,
-                })
-
-                if test_loader is not None:
-                    # Run inference with cached checkpoint on test set
-                    model = create_model(
-                        model_name=cfg.model.name,
-                        pretrained=False,
-                        num_classes=cfg.model.num_classes,
-                    ).to(self.device)
-                    ckpt = torch.load(fold_ckpt_path, map_location=self.device, weights_only=False)
-                    model.load_state_dict(ckpt["model_state_dict"])
-                    t_probs = self._predict(model, test_loader)
-                    test_probabilities_list.append(t_probs)
-                    del model
-                    torch.cuda.empty_cache()
-                continue
 
             set_seed(cfg.seed + fold_idx)
 
@@ -434,6 +464,7 @@ class OOFGenerator:
                     "split_random_state": self.split_seed,
                     "external_validation_directory": os.path.basename(validation_dirs[0]),
                 },
+                run_id=self.run_id,
             )
 
             self._place_oof_rows(
@@ -472,6 +503,12 @@ class OOFGenerator:
         if test_probabilities is not None:
             np.save(os.path.join(self.output_dir, "test_probabilities.npy"), test_probabilities)
 
+        fold_checkpoint_hashes = {
+            f"fold_{index}": sha256_file(
+                os.path.join(self.output_dir, f"fold_{index}", "best_model.pth")
+            )
+            for index in range(1, self.n_splits + 1)
+        }
         save_prediction_artifact(
             os.path.join(self.output_dir, "oof_predictions.npz"),
             sample_ids=all_sample_ids,
@@ -482,6 +519,12 @@ class OOFGenerator:
             protocol="oof",
             method=cfg.model.name,
             split="oof_train",
+            run_id=self.run_id,
+            dataset_manifest_sha256=dataset_manifest_sha256,
+            config_sha256=config_sha256,
+            source_commit=source_commit,
+            artifact_hashes=fold_checkpoint_hashes,
+            aggregation_semantics="one_outer_holdout_checkpoint_per_training_row",
         )
         if test_probabilities is not None:
             if test_labels is None or test_sample_ids is None:
@@ -496,8 +539,26 @@ class OOFGenerator:
                 protocol="oof",
                 method=cfg.model.name,
                 split="test",
+                run_id=self.run_id,
+                dataset_manifest_sha256=dataset_manifest_sha256,
+                config_sha256=config_sha256,
+                source_commit=source_commit,
+                artifact_hashes=fold_checkpoint_hashes,
+                aggregation_semantics="mean_fold_probabilities",
             )
 
+        for index in range(1, self.n_splits + 1):
+            expected_cache_identity["folds"][str(index)]["checkpoint_sha256"] = (
+                fold_checkpoint_hashes[f"fold_{index}"]
+            )
+        expected_cache_identity["cache_artifact_hashes"] = {
+            "oof_probabilities": sha256_file(oof_prob_file),
+            "oof_labels": sha256_file(oof_lbl_file),
+            "oof_predictions": sha256_file(os.path.join(self.output_dir, "oof_predictions.npz")),
+            "test_probabilities": sha256_file(test_prob_file) if os.path.isfile(test_prob_file) else None,
+            "test_predictions": sha256_file(os.path.join(self.output_dir, "test_predictions.npz"))
+            if os.path.isfile(os.path.join(self.output_dir, "test_predictions.npz")) else None,
+        }
         # Save class mappings and experiment config
         class_to_idx = getattr(full_train_dataset, "class_to_idx", {c: i for i, c in enumerate(class_names)})
         with open(os.path.join(self.output_dir, "class_to_idx.json"), "w", encoding="utf-8") as f:
@@ -551,6 +612,8 @@ class OOFGenerator:
         self.logger.info(f"\n{'='*65}\n  5-FOLD CROSS VALIDATION RESULTS SUMMARY\n{'='*65}")
         self.logger.info(f"\n{formatted_df.to_string(index=False)}")
         self.logger.info(f"\nResults saved to: {self.output_dir}")
+
+        write_json(cache_manifest_path, expected_cache_identity)
 
         return oof_probabilities, all_labels, test_probabilities
 
@@ -778,6 +841,14 @@ class OOFGenerator:
             protocol="oof",
             method=self.config.model.name,
             split="outer_holdout",
+            run_id=self.run_id,
+            dataset_manifest_sha256=load_dataset_manifest_sha256(),
+            config_sha256=sha256_file(self.config_path),
+            source_commit=require_git_commit(),
+            artifact_hashes={
+                "checkpoint": sha256_file(os.path.join(fold_dir, "best_model.pth"))
+            },
+            aggregation_semantics="frozen_fold_checkpoint_outer_holdout_inference",
         )
 
         outer_holdout_preds = np.argmax(outer_holdout_probs, axis=1)

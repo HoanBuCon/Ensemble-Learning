@@ -14,7 +14,6 @@ CLI::
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -29,30 +28,44 @@ if PROJECT_ROOT not in sys.path:
 import pandas as pd
 
 from scripts.train import train as train_model
-from scripts.generate_comparison import generate_base_comparison_report
 from src.utils.report import (
     count_parameters,
     get_model_size_mb,
     extract_model_history_info,
     extract_model_val_metrics,
 )
+from src.utils.run_identity import (
+    final_run_root,
+    model_run_root,
+    resolve_backbone_config_paths,
+    validate_run_id,
+)
 
 
-def inspect_model_status(config_path: str) -> Dict[str, Any]:
+def _required_metric(metrics: Dict[str, Any], key: str) -> float:
+    if key not in metrics or metrics[key] is None:
+        raise KeyError(f"Required metric is missing: {key}")
+    return float(metrics[key])
+
+
+def inspect_model_status(
+    config_path: str, *, run_id: str, results_root: str = "RESULTS"
+) -> Dict[str, Any]:
     """
     Inspect the training status of a model from its output directory.
 
     Returns:
         Dict with status ('COMPLETED', 'RESUMABLE', 'NOT_STARTED'), last_epoch,
-        best_epoch, best_val_accuracy, total_epochs, and save_dir.
+        accepted_checkpoint_epoch, accepted_checkpoint_val_accuracy,
+        total_epochs, and save_dir.
     """
     from src.utils.config import load_config
     import torch
 
     cfg = load_config(config_path)
-    save_dir = cfg.checkpoint.save_dir
+    save_dir = str(model_run_root(results_root, run_id, "single_split", cfg.model.name))
     total_epochs = cfg.train.epochs
-    metrics_path = os.path.join(save_dir, "metrics.json")
+    metrics_path = os.path.join(save_dir, "test_metrics.json")
     last_ckpt_path = os.path.join(save_dir, "last_model.pth")
 
     hist_info = extract_model_history_info(save_dir)
@@ -64,8 +77,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
             "experiment_name": cfg.experiment_name,
             "status": "COMPLETED",
             "last_epoch": total_epochs,
-            "best_epoch": hist_info["best_epoch"] or total_epochs,
-            "best_val_accuracy": hist_info["best_val_accuracy"],
+            "accepted_checkpoint_epoch": hist_info["accepted_checkpoint_epoch"],
+            "accepted_checkpoint_val_accuracy": hist_info["accepted_checkpoint_val_accuracy"],
             "total_epochs": total_epochs,
             "save_dir": save_dir,
         }
@@ -80,8 +93,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
                 "experiment_name": cfg.experiment_name,
                 "status": "RESUMABLE",
                 "last_epoch": last_epoch,
-                "best_epoch": hist_info["best_epoch"] or last_epoch,
-                "best_val_accuracy": hist_info["best_val_accuracy"],
+                "accepted_checkpoint_epoch": hist_info["accepted_checkpoint_epoch"],
+                "accepted_checkpoint_val_accuracy": hist_info["accepted_checkpoint_val_accuracy"],
                 "total_epochs": total_epochs,
                 "save_dir": save_dir,
             }
@@ -94,8 +107,8 @@ def inspect_model_status(config_path: str) -> Dict[str, Any]:
         "experiment_name": cfg.experiment_name,
         "status": "NOT_STARTED",
         "last_epoch": 0,
-        "best_epoch": 0,
-        "best_val_accuracy": 0.0,
+        "accepted_checkpoint_epoch": None,
+        "accepted_checkpoint_val_accuracy": None,
         "total_epochs": total_epochs,
         "save_dir": save_dir,
     }
@@ -145,7 +158,10 @@ def display_status_table(statuses: List[Dict[str, Any]]) -> None:
     console.print()
 
 
-def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame:
+def run_experiments(
+    config_paths: List[str], mode: str = "auto", *, run_id: str,
+    results_root: str = "RESULTS",
+) -> pd.DataFrame:
     """
     Train all models and generate a comparison table.
 
@@ -156,14 +172,15 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
     Returns:
         DataFrame with the comparison table.
     """
-    config_paths = [p for p in config_paths if os.path.basename(p) != "dataset.yaml"]
+    run_id = validate_run_id(run_id)
+    config_paths = resolve_backbone_config_paths(config_paths)
     if not config_paths:
         print("No valid model config files provided.")
         return pd.DataFrame()
 
     results_list: List[Dict[str, Any]] = []
 
-    statuses = [inspect_model_status(p) for p in config_paths]
+    statuses = [inspect_model_status(p, run_id=run_id, results_root=results_root) for p in config_paths]
     display_status_table(statuses)
 
     # Determine mode if interactive
@@ -203,7 +220,7 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
 
         # Skip already completed models in resume mode
         if is_resume_mode and status_info["status"] == "COMPLETED":
-            metrics_path = os.path.join(status_info["save_dir"], "metrics.json")
+            metrics_path = os.path.join(status_info["save_dir"], "test_metrics.json")
             if os.path.exists(metrics_path):
                 try:
                     with open(metrics_path, "r", encoding="utf-8") as f:
@@ -215,59 +232,67 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
                     row = {
                         "Model": status_info["model_name"],
                         "Experiment": status_info["experiment_name"],
-                        "Best_Epoch": status_info.get("best_epoch", status_info["last_epoch"]),
+                        "Best_Epoch": status_info.get("accepted_checkpoint_epoch"),
                         "Val_Accuracy": val_metrics["Val_Accuracy"],
                         "Val_Precision": val_metrics["Val_Precision"],
                         "Val_Recall": val_metrics["Val_Recall"],
                         "Val_F1_Score": val_metrics["Val_F1_Score"],
-                        "Test_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
-                        "Test_Precision": eval_metrics.get("precision", 0.0) * 100,
-                        "Test_Recall": eval_metrics.get("recall", 0.0) * 100,
-                        "Test_F1_Score": eval_metrics.get("f1_score", 0.0) * 100,
+                        "Test_Accuracy": _required_metric(eval_metrics, "accuracy") * 100,
+                        "Test_Precision": _required_metric(eval_metrics, "precision") * 100,
+                        "Test_Recall": _required_metric(eval_metrics, "recall") * 100,
+                        "Test_F1_Score": _required_metric(eval_metrics, "f1_score") * 100,
                         "Parameters": n_params,
                         "Parameters_M": n_params / 1e6,
-                        "Training_Time_s": 0.0,
-                        "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
+                        "Training_Time_s": None,
+                        "Inference_Time_s": _required_metric(eval_metrics, "inference_time_seconds"),
                         "Model_Size_MB": get_model_size_mb(status_info["save_dir"]),
                     }
                     results_list.append(row)
-                    print(f"  [SKIP] {status_info['model_name']} - Already COMPLETED (Test Acc: {row['Test_Accuracy']:.2f}%, Val Acc: {row['Val_Accuracy']:.2f}%)")
+                    val_display = (
+                        "N/A" if row["Val_Accuracy"] is None
+                        else f"{float(row['Val_Accuracy']):.2f}%"
+                    )
+                    print(
+                        f"  [SKIP] {status_info['model_name']} - Already COMPLETED "
+                        f"(Test Acc: {row['Test_Accuracy']:.2f}%, Val Acc: {val_display})"
+                    )
                     continue
                 except Exception as e:
-                    print(f"  Warning: Failed to load completed metrics from {metrics_path}: {e}")
+                    raise RuntimeError(
+                        f"Completed run has invalid canonical metrics: {metrics_path}"
+                    ) from e
 
         start_time = time.time()
 
         try:
-            result = train_model(config_path, resume=is_resume_mode)
+            result = train_model(
+                config_path, resume=is_resume_mode,
+                run_id=run_id, results_root=results_root,
+            )
             total_time = time.time() - start_time
 
             eval_metrics = result.get("eval_metrics", {})
-            save_d = result.get("history", {}).get("save_dir", "") if isinstance(result.get("history"), dict) else ""
+            save_d = result["save_dir"]
             val_metrics = extract_model_val_metrics(save_d)
 
             row = {
-                "Model": result.get("model_name", "unknown"),
-                "Experiment": result.get("experiment_name", "unknown"),
-                "Best_Epoch": result.get("best_epoch", 0),
+                "Model": result["model_name"],
+                "Experiment": result["experiment_name"],
+                "Best_Epoch": result["accepted_checkpoint_epoch"],
                 "Val_Accuracy": val_metrics["Val_Accuracy"],
                 "Val_Precision": val_metrics["Val_Precision"],
                 "Val_Recall": val_metrics["Val_Recall"],
                 "Val_F1_Score": val_metrics["Val_F1_Score"],
-                "Test_Accuracy": eval_metrics.get("accuracy", 0.0) * 100,
-                "Test_Precision": eval_metrics.get("precision", 0.0) * 100,
-                "Test_Recall": eval_metrics.get("recall", 0.0) * 100,
-                "Test_F1_Score": eval_metrics.get("f1_score", 0.0) * 100,
-                "Parameters": result.get("num_params", 0),
-                "Parameters_M": result.get("num_params", 0) / 1e6,
+                "Test_Accuracy": _required_metric(eval_metrics, "accuracy") * 100,
+                "Test_Precision": _required_metric(eval_metrics, "precision") * 100,
+                "Test_Recall": _required_metric(eval_metrics, "recall") * 100,
+                "Test_F1_Score": _required_metric(eval_metrics, "f1_score") * 100,
+                "Parameters": result["num_params"],
+                "Parameters_M": result["num_params"] / 1e6,
                 "Training_Time_s": total_time,
-                "Inference_Time_s": eval_metrics.get("inference_time_seconds", 0.0),
+                "Inference_Time_s": _required_metric(eval_metrics, "inference_time_seconds"),
                 "Model_Size_MB": get_model_size_mb(save_d),
             }
-
-            from src.utils.config import load_config
-            cfg = load_config(config_path)
-            row["Model_Size_MB"] = get_model_size_mb(cfg.checkpoint.save_dir)
 
             results_list.append(row)
 
@@ -279,9 +304,12 @@ def run_experiments(config_paths: List[str], mode: str = "auto") -> pd.DataFrame
             print(f"  Error: {e}")
             import traceback
             traceback.print_exc()
+            raise
 
-    # Generate comparison report and visualization bar plots
-    df = generate_base_comparison_report(config_paths=config_paths)
+    df = pd.DataFrame(results_list)
+    report_dir = final_run_root(results_root, run_id) / "single_split"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(report_dir / "base_model_comparison.csv", index=False)
     return df
 
 
@@ -295,6 +323,8 @@ if __name__ == "__main__":
         default=None,
         help="List of config files. Defaults to all configs/*.yaml",
     )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument(
         "--mode",
         choices=["scratch", "resume", "auto"],
@@ -304,12 +334,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.configs:
-        config_paths = [p for p in args.configs if os.path.basename(p) != "dataset.yaml"]
+        config_paths = resolve_backbone_config_paths(args.configs)
     else:
-        config_paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
+        config_paths = resolve_backbone_config_paths()
 
     if not config_paths:
         print("No config files found. Provide --configs or add files to configs/")
         sys.exit(1)
 
-    run_experiments(config_paths, mode=args.mode)
+    run_experiments(
+        config_paths, mode=args.mode, run_id=args.run_id,
+        results_root=args.results_root,
+    )

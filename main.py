@@ -19,7 +19,6 @@ CLI Commands::
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 import sys
 from typing import List, Optional
@@ -43,6 +42,7 @@ from scripts.verification.eval_mcnemar_test import run_mcnemar_analysis
 from scripts.verification.eval_advanced_metrics import evaluate_advanced_metrics as evaluate_advanced_benchmark
 from scripts.verification.eval_latency_throughput import run_hardware_benchmark as evaluate_hardware_latency
 from scripts.verification.eval_tsne import run_tsne_analysis as evaluate_tsne_clustering
+from src.utils.run_identity import resolve_backbone_config_paths
 
 
 def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
@@ -58,6 +58,8 @@ def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
     """
     if current_mode in ["val", "oof"]:
         return current_mode
+    if current_mode is not None:
+        raise ValueError(f"Unknown ensemble mode: {current_mode}")
 
     print("\n" + "=" * 80)
     print("                    SELECT ENSEMBLE EVALUATION PROTOCOL")
@@ -68,7 +70,7 @@ def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
     print("  [2] Full 5-Fold OOF Mode (oof) ~10-13 hrs")
     print("      - Trains 5 folds for each of 4 base models (20 models total).")
     print("      - Fits Stacking meta-learners on full 7,000 Out-of-Fold (OOF) train predictions.")
-    print("      - Gold-standard paper quality with zero data leakage for academic thesis.")
+    print("      - Fixed external validation selects checkpoints; outer folds are inference-only.")
     print("-" * 80)
 
     try:
@@ -80,15 +82,54 @@ def prompt_ensemble_mode(current_mode: Optional[str] = None) -> str:
 
 
 def resolve_config_paths(configs: Optional[List[str]]) -> List[str]:
-    """Resolve list of YAML config files or default to all model configs (excluding dataset.yaml)."""
-    if configs:
-        paths = [p for p in configs if os.path.basename(p) != "dataset.yaml"]
-    else:
-        paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
-    if not paths:
-        print("Error: No YAML model config files found in configs/ directory.")
-        sys.exit(1)
-    return paths
+    """Resolve only the four registered executable backbone configs."""
+    return resolve_backbone_config_paths(configs)
+
+
+def canonical_protocol_from_mode(mode: str) -> str:
+    """Map the CLI alias onto the only persisted protocol identities."""
+    if mode == "val":
+        return "single_split"
+    if mode == "oof":
+        return "oof"
+    raise ValueError(f"Unknown ensemble mode: {mode}")
+
+
+def dispatch_verification_task(
+    task: str,
+    *,
+    results_root: str,
+    run_id: str,
+    save_dir: Optional[str],
+    protocol: Optional[str] = None,
+    skip_tsne: bool = False,
+):
+    """Current verification API contract; safe to smoke-test with mocked callees."""
+    if task == "calibration":
+        return evaluate_all_calibration(results_root, save_dir, run_id=run_id)
+    if task == "diversity":
+        return evaluate_diversity(results_root, save_dir, run_id=run_id)
+    if task == "mcnemar":
+        return run_mcnemar_analysis(results_root, save_dir, run_id=run_id)
+    if task == "advanced":
+        return evaluate_advanced_benchmark(results_root, save_dir, run_id=run_id)
+    if task == "latency":
+        if protocol not in {"single_split", "oof"}:
+            raise ValueError("--protocol is required for latency")
+        return evaluate_hardware_latency(
+            protocol, results_root, save_dir=save_dir, run_id=run_id
+        )
+    if task == "tsne":
+        if protocol not in {"single_split", "oof"}:
+            raise ValueError("--protocol is required for t-SNE")
+        return evaluate_tsne_clustering(
+            "probability_vector", protocol, results_root, save_dir, run_id=run_id
+        )
+    if task == "all":
+        return run_verification_suite(
+            results_root, save_dir, skip_tsne, run_id=run_id
+        )
+    raise ValueError(f"Unknown verification task: {task}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -136,13 +177,13 @@ AUTOMATIC EVALUATION NOTE:
 
 ENSEMBLE PROTOCOLS EXPLAINED:
   - Fast Validation Mode ('val') ~30 sec:
-    Fits Stacking meta-learners on cached Validation set predictions (1,568 samples).
+    Fits stacking meta-learners on identity-checked validation predictions.
     Ideal for rapid prototyping, pipeline verification, and fast experiment loops.
 
   - Full 5-Fold OOF Mode ('oof') ~10-13 hrs:
     Trains 5 folds per base backbone (20 models total) and builds Out-of-Fold predictions.
-    Fits Stacking meta-learners on 7,000 OOF samples with zero data leakage.
-    Gold-standard quality required for academic thesis and paper publication.
+    Fits stacking meta-learners on cross-fitted training predictions.
+    Fixed external validation selects checkpoints; outer folds are inference-only.
 """
 
     parser = argparse.ArgumentParser(
@@ -176,11 +217,8 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         default=None,
         help="Ensemble protocol: 'val' (Single-Split) or 'oof' (5-Fold CV). Prompts interactively if omitted.",
     )
-    pipe_parser.add_argument(
-        "--outputs-dir",
-        default=None,
-        help="Output directory (default: 'RESULTS/DEFAULT_TRAINING/outputs' for val, 'RESULTS/OOF_TRAINING/outputs' for oof)",
-    )
+    pipe_parser.add_argument("--run-id", required=True)
+    pipe_parser.add_argument("--results-root", default="RESULTS")
 
     # 2. Train All Base Models Subcommand (No Ensemble)
     bench_parser = subparsers.add_parser(
@@ -201,6 +239,9 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         help="Training mode: 'scratch', 'resume', or 'auto'",
     )
 
+    bench_parser.add_argument("--run-id", required=True)
+    bench_parser.add_argument("--results-root", default="RESULTS")
+
     # 3. Train Single Subcommand
     train_parser = subparsers.add_parser(
         "train",
@@ -213,12 +254,16 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         action="store_true",
         help="Resume training from last_model.pth if available",
     )
+    train_parser.add_argument("--run-id", required=True)
+    train_parser.add_argument("--results-root", default="RESULTS")
 
     # 4. Evaluate Subcommand
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate a trained model checkpoint")
     eval_parser.add_argument("config", help="Path to YAML config file (e.g. configs/resnet50.yaml)")
     eval_parser.add_argument("--checkpoint", default=None, help="Path to specific checkpoint file")
     eval_parser.add_argument("--split", default="test", choices=["test", "val"], help="Dataset split to evaluate")
+    eval_parser.add_argument("--run-id", required=True)
+    eval_parser.add_argument("--results-root", default="RESULTS")
 
     # 5. Ensemble Subcommand
     ens_parser = subparsers.add_parser("ensemble", help="Run ensemble evaluation on base model predictions (Voting & Stacking)")
@@ -228,56 +273,35 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         default=None,
         help="Ensemble mode: 'val' (Single-Split) or 'oof' (5-Fold CV). Prompts interactively if omitted.",
     )
-    ens_parser.add_argument(
-        "--outputs-dir",
-        default=None,
-        help="Output directory (default: 'RESULTS/DEFAULT_TRAINING/outputs' for val, 'RESULTS/OOF_TRAINING/outputs' for oof)",
-    )
+    ens_parser.add_argument("--run-id", required=True)
+    ens_parser.add_argument("--results-root", default="RESULTS")
 
     # 6. Report Subcommand
     report_parser = subparsers.add_parser("report", help="Re-generate comparison Markdown/CSV reports & bar charts")
-    report_parser.add_argument(
-        "--outputs-dir",
-        default=None,
-        help="Output directory (default: scan both RESULTS/DEFAULT_TRAINING and RESULTS/OOF_TRAINING)",
-    )
-    report_parser.add_argument(
-        "--configs",
-        nargs="*",
-        default=None,
-        help="Optional list of YAML config files to inspect",
-    )
+    report_parser.add_argument("--results-root", default="RESULTS")
+    report_parser.add_argument("--run-id", required=True)
 
     # 7. Plot Subcommand (Master Plot Generator)
     plot_parser = subparsers.add_parser("plot", aliases=["plots", "visualize"], help="Generate complete visualization suite (Training, ROC, PR, CM, Heatmaps, Radar)")
-    plot_parser.add_argument(
-        "--outputs-dir",
-        default=None,
-        help="Output directory (default: scan both RESULTS/DEFAULT_TRAINING and RESULTS/OOF_TRAINING)",
-    )
+    plot_parser.add_argument("--results-root", default="RESULTS")
+    plot_parser.add_argument("--run-id", required=True)
 
     # 8. K-Fold Subcommand (5-Fold Cross Validation for Single Model)
     kfold_parser = subparsers.add_parser("kfold", help="Run 5-Fold Cross Validation for a single backbone")
     kfold_parser.add_argument("config", help="Path to YAML config file (e.g. configs/resnet50.yaml)")
+    kfold_parser.add_argument("--run-id", required=True)
+    kfold_parser.add_argument("--results-root", default="RESULTS")
     kfold_parser.add_argument("--folds", type=int, default=5, help="Number of folds (default: 5)")
     kfold_parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (default: 42)")
     kfold_parser.add_argument("--force-retrain", action="store_true", help="Force retrain all folds")
-    kfold_parser.add_argument(
-        "--outputs-dir",
-        default="RESULTS/OOF_TRAINING/outputs",
-        help="Directory to save K-Fold outputs (default: 'RESULTS/OOF_TRAINING/outputs')",
-    )
 
     # 9. K-Fold All Subcommand (5-Fold Cross Validation for All Models)
     kfold_all_parser = subparsers.add_parser("kfold-all", help="Run 5-Fold Cross Validation for ALL backbone models")
+    kfold_all_parser.add_argument("--run-id", required=True)
+    kfold_all_parser.add_argument("--results-root", default="RESULTS")
     kfold_all_parser.add_argument("--folds", type=int, default=5, help="Number of folds (default: 5)")
     kfold_all_parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (default: 42)")
     kfold_all_parser.add_argument("--force-retrain", action="store_true", help="Force retrain all folds")
-    kfold_all_parser.add_argument(
-        "--outputs-dir",
-        default="RESULTS/OOF_TRAINING/outputs",
-        help="Directory to save K-Fold outputs (default: 'RESULTS/OOF_TRAINING/outputs')",
-    )
 
     # 10. Serve Subcommand (FastAPI Web Server)
     serve_parser = subparsers.add_parser(
@@ -301,31 +325,26 @@ ENSEMBLE PROTOCOLS EXPLAINED:
         default="all",
         help="Verification task: 'all', 'calibration', 'diversity', or 'mcnemar' (default: 'all')",
     )
-    verify_parser.add_argument(
-        "--default-dir",
-        default=None,
-        help="Optional path to Single-Split outputs directory (auto-discovered if omitted)",
-    )
-    verify_parser.add_argument(
-        "--oof-dir",
-        default=None,
-        help="Optional path to 5-Fold OOF outputs directory (auto-discovered if omitted)",
-    )
+    verify_parser.add_argument("--results-root", default="RESULTS")
+    verify_parser.add_argument("--run-id", required=True)
+    verify_parser.add_argument("--protocol", choices=["single_split", "oof"], default=None)
     verify_parser.add_argument(
         "--save-dir",
-        default="RESULTS/verification",
-        help="Directory to save exported verification CSV, JSON, and Markdown reports (default: 'RESULTS/verification')",
+        default=None,
+        help="Optional explicit verification output directory inside the selected run",
     )
     verify_parser.add_argument(
         "--skip-visuals",
         action="store_true",
-        help="Skip t-SNE plot generation for faster numeric verification",
+        help="Skip t-SNE plot generation in the full suite",
     )
 
     return parser
 
 
-def prompt_base_models_training(outputs_dir: Optional[str] = None) -> str:
+def prompt_base_models_training(
+    run_id: str, results_root: str = "RESULTS"
+) -> str:
     """
     Check if valid base model outputs exist in outputs_dir, and interactively
     prompt the user to choose between using existing outputs or re-training from scratch.
@@ -334,11 +353,14 @@ def prompt_base_models_training(outputs_dir: Optional[str] = None) -> str:
         Training mode string: 'auto' (use existing outputs/skip) or 'scratch' (re-train from scratch).
     """
     from scripts.run_experiments import inspect_model_status
-    config_paths = [p for p in sorted(glob.glob("configs/*.yaml")) if os.path.basename(p) != "dataset.yaml"]
+    config_paths = resolve_config_paths(None)
     if not config_paths:
         return "auto"
 
-    statuses = [inspect_model_status(p) for p in config_paths]
+    statuses = [
+        inspect_model_status(p, run_id=run_id, results_root=results_root)
+        for p in config_paths
+    ]
     completed_models = [s for s in statuses if s["status"] == "COMPLETED"]
 
     if completed_models:
@@ -347,8 +369,9 @@ def prompt_base_models_training(outputs_dir: Optional[str] = None) -> str:
         print("=" * 80)
         print("  Found completed trained base model outputs:")
         for m in completed_models:
-            acc = m.get("best_val_accuracy", 0.0) * 100 if m.get("best_val_accuracy", 0.0) <= 1.0 else m.get("best_val_accuracy", 0.0)
-            print(f"  - {m['model_name']} ({m['config_path']}): Val Acc: {acc:.2f}%")
+            acc = m.get("accepted_checkpoint_val_accuracy")
+            display = "N/A" if acc is None else f"{float(acc):.2f}%"
+            print(f"  - {m['model_name']} ({m['config_path']}): Val Acc: {display}")
         print("\n  Select Base Model Training Action:")
         print("  [1] Use existing outputs & proceed directly to Ensemble Evaluation (Fast) [Default]")
         print("  [2] Re-train all 4 base models from scratch (Epoch 1)")
@@ -431,6 +454,10 @@ def select_menu_option(options: List[str], header_title: str) -> int:
 
 def run_interactive_cli_menu() -> None:
     """Run interactive menu loop for Master CLI."""
+    run_id = input("Scientific run_id (required): ").strip()
+    from src.utils.run_identity import validate_run_id
+    run_id = validate_run_id(run_id)
+    results_root = "RESULTS"
     menu_options = [
         "🚀 Run Full End-to-End Pipeline (Train Base -> Report -> Ensemble)",
         "🏋️ Train a Single Backbone Model (ResNet-50 / DenseNet-121 / EfficientNet-B0 / Swin-Tiny)",
@@ -452,29 +479,31 @@ def run_interactive_cli_menu() -> None:
             )
 
             if choice_idx == 0:
-                train_mode = prompt_base_models_training()
+                train_mode = prompt_base_models_training(run_id, results_root)
                 ensemble_mode = prompt_ensemble_mode()
                 config_paths = resolve_config_paths(None)
                 print("\n" + "=" * 80)
                 print(f"  STEP 1/3: BASE MODELS BENCHMARK & REPORT GENERATION (MODE: {train_mode.upper()})")
                 print("=" * 80 + "\n")
-                run_experiments(config_paths, mode=train_mode)
+                run_experiments(
+                    config_paths, mode=train_mode, run_id=run_id,
+                    results_root=results_root,
+                )
                 print("\n" + "=" * 80)
                 print(f"  STEP 2/3: ENSEMBLE EVALUATION PIPELINE (MODE: {ensemble_mode.upper()})")
                 print("=" * 80 + "\n")
-                run_ensemble_evaluation(mode=ensemble_mode)
+                run_ensemble_evaluation(
+                    protocol=canonical_protocol_from_mode(ensemble_mode),
+                    results_root=results_root, run_id=run_id,
+                )
                 print("\n" + "=" * 80)
                 print("  STEP 3/3: SCIENTIFIC VERIFICATION & CALIBRATION SUITE")
                 print("=" * 80 + "\n")
-                try:
-                    run_verification_suite(save_dir="RESULTS/verification")
-                except Exception as e:
-                    print(f"Warning: Verification suite encountered an issue: {e}")
+                run_verification_suite(results_root, None, False, run_id=run_id)
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 1:
-                configs = sorted(glob.glob("configs/*.yaml"))
-                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                configs = resolve_config_paths(None)
                 cfg_options = [f"{os.path.basename(c).replace('.yaml','').upper()} ({c})" for c in configs]
                 cfg_idx = select_menu_option(cfg_options, "SELECT BACKBONE MODEL TO TRAIN")
                 target_cfg = configs[cfg_idx]
@@ -482,30 +511,39 @@ def run_interactive_cli_menu() -> None:
                     ["Auto-resume / Scratch mode [Default]", "Force resume from last_model.pth"],
                     f"TRAINING OPTIONS: {target_cfg}",
                 )
-                run_train(target_cfg, resume=(resume_choice == 1))
+                run_train(
+                    target_cfg, resume=(resume_choice == 1),
+                    run_id=run_id, results_root=results_root,
+                )
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 2:
                 mode = prompt_ensemble_mode()
-                run_ensemble_evaluation(mode=mode)
+                run_ensemble_evaluation(
+                    protocol=canonical_protocol_from_mode(mode),
+                    results_root=results_root, run_id=run_id,
+                )
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 3:
-                configs = sorted(glob.glob("configs/*.yaml"))
-                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                configs = resolve_config_paths(None)
                 kfold_options = ["Run 5-Fold CV on ALL Backbones"] + [f"Run 5-Fold CV on {os.path.basename(c).replace('.yaml','').upper()}" for c in configs]
                 k_idx = select_menu_option(kfold_options, "5-FOLD CROSS VALIDATION MENU")
                 if k_idx == 0:
-                    run_all_kfold_experiments(config_paths=configs, n_splits=5, outputs_dir="RESULTS/OOF_TRAINING/outputs")
+                    run_all_kfold_experiments(
+                        config_paths=configs, n_splits=5, run_id=run_id,
+                        results_root=results_root,
+                    )
                 else:
                     target_cfg = configs[k_idx - 1]
-                    cfg = load_config(target_cfg)
-                    m_out_d = os.path.join("RESULTS", "OOF_TRAINING", "outputs", cfg.model.name, "kfold")
-                    run_kfold_experiment(target_cfg, n_splits=5, output_dir=m_out_d)
+                    run_kfold_experiment(
+                        target_cfg, n_splits=5, run_id=run_id,
+                        results_root=results_root,
+                    )
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 4:
-                generate_all_plots()
+                generate_all_plots(outputs_dir=results_root, run_id=run_id)
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 5:
@@ -514,43 +552,23 @@ def run_interactive_cli_menu() -> None:
                 uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=False)
 
             elif choice_idx == 6:
-                configs = sorted(glob.glob("configs/*.yaml"))
-                configs = [c for c in configs if not c.endswith("dataset.yaml")]
+                configs = resolve_config_paths(None)
                 cfg_options = [f"{os.path.basename(c).replace('.yaml','').upper()} ({c})" for c in configs]
                 cfg_idx = select_menu_option(cfg_options, "SELECT MODEL TO EVALUATE")
                 target_cfg = configs[cfg_idx]
                 split_idx = select_menu_option(["Test Split (Default)", "Validation Split"], "SELECT DATASET SPLIT")
                 split_name = "test" if split_idx == 0 else "val"
-                run_evaluate(target_cfg, checkpoint_path=None, split=split_name)
+                run_evaluate(
+                    target_cfg, checkpoint_path=None, split=split_name,
+                    run_id=run_id, results_root=results_root,
+                )
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 7:
                 print("\n" + "=" * 80)
                 print("       RE-GENERATE COMPARISON TABLES & BENCHMARK REPORTS")
                 print("=" * 80)
-                # 1. Base Model Comparison Table & Charts
-                for d_cand in ["RESULTS/DEFAULT_TRAINING/outputs", "RESULTS/OOF_TRAINING/outputs"]:
-                    if os.path.isdir(d_cand):
-                        try:
-                            generate_base_comparison_report(outputs_dir=d_cand, config_paths=None)
-                        except Exception:
-                            pass
-
-                # 2. Check and regenerate Ensemble reports for 'oof' and/or 'val'
-                for ens_mode in ["oof", "val"]:
-                    target_d = "RESULTS/OOF_TRAINING/outputs" if ens_mode == "oof" else "RESULTS/DEFAULT_TRAINING/outputs"
-                    if os.path.exists(os.path.join(target_d, ens_mode)):
-                        try:
-                            print(f"\n--> Re-generating Ensemble Benchmark Report (Mode: {ens_mode.upper()})...")
-                            run_ensemble_evaluation(mode=ens_mode, outputs_dir=target_d)
-                        except Exception as e:
-                            print(f"  Warning: Ensemble eval ({ens_mode}) failed: {e}")
-
-                # 3. Refresh full diagnostic plot suite
-                try:
-                    generate_all_plots()
-                except Exception as e:
-                    print(f"  Warning: generate_all_plots failed: {e}")
+                generate_all_plots(outputs_dir=results_root, run_id=run_id)
 
                 input("\nPress ENTER to return to main menu...")
 
@@ -558,7 +576,7 @@ def run_interactive_cli_menu() -> None:
                 print("\n" + "=" * 80)
                 print("      RUNNING SCIENTIFIC VERIFICATION & BENCHMARKING SUITE")
                 print("=" * 80)
-                run_verification_suite()
+                run_verification_suite(results_root, None, False, run_id=run_id)
                 input("\nPress ENTER to return to main menu...")
 
             elif choice_idx == 9:
@@ -585,24 +603,33 @@ def main() -> None:
         uvicorn.run("server:app", host=args.host, port=args.port, reload=args.reload)
 
     elif args.command in ["train", "train-single"]:
-        run_train(args.config, resume=args.resume)
+        run_train(args.config, resume=args.resume, run_id=args.run_id, results_root=args.results_root)
 
     elif args.command == "evaluate":
-        run_evaluate(args.config, checkpoint_path=args.checkpoint, split=args.split)
+        run_evaluate(
+            args.config, checkpoint_path=args.checkpoint, split=args.split,
+            run_id=args.run_id, results_root=args.results_root,
+        )
 
     elif args.command in ["train-all", "benchmark", "train-base"]:
         config_paths = resolve_config_paths(args.configs)
-        run_experiments(config_paths, mode=args.mode)
+        run_experiments(
+            config_paths, mode=args.mode, run_id=args.run_id,
+            results_root=args.results_root,
+        )
 
     elif args.command == "ensemble":
         mode = prompt_ensemble_mode(args.mode)
-        run_ensemble_evaluation(mode=mode, outputs_dir=args.outputs_dir)
+        run_ensemble_evaluation(
+            protocol=canonical_protocol_from_mode(mode),
+            results_root=args.results_root, run_id=args.run_id,
+        )
 
     elif args.command == "report":
-        generate_all_plots(outputs_dir=args.outputs_dir)
+        generate_all_plots(outputs_dir=args.results_root, run_id=args.run_id)
 
     elif args.command in ["plot", "plots", "visualize"]:
-        generate_all_plots(outputs_dir=args.outputs_dir)
+        generate_all_plots(outputs_dir=args.results_root, run_id=args.run_id)
 
     elif args.command == "kfold":
         run_kfold_experiment(
@@ -610,6 +637,8 @@ def main() -> None:
             n_splits=args.folds,
             split_seed=args.seed,
             force_retrain=args.force_retrain,
+            run_id=args.run_id,
+            results_root=args.results_root,
         )
 
     elif args.command == "kfold-all":
@@ -618,51 +647,47 @@ def main() -> None:
             n_splits=args.folds,
             split_seed=args.seed,
             force_retrain=args.force_retrain,
+            run_id=args.run_id,
+            results_root=args.results_root,
         )
 
     elif args.command in ["verify", "benchmark-verify", "audit"]:
-        if args.task == "calibration":
-            evaluate_all_calibration(default_dir=args.default_dir, oof_dir=args.oof_dir, save_dir=args.save_dir)
-        elif args.task == "diversity":
-            evaluate_diversity(default_dir=args.default_dir, oof_dir=args.oof_dir, save_dir=args.save_dir)
-        elif args.task == "mcnemar":
-            run_mcnemar_analysis(default_dir=args.default_dir, oof_dir=args.oof_dir, save_dir=args.save_dir)
-        elif args.task == "advanced":
-            evaluate_advanced_benchmark(default_dir=args.default_dir, oof_dir=args.oof_dir, save_dir=args.save_dir)
-        elif args.task == "latency":
-            evaluate_hardware_latency(save_dir=args.save_dir)
-        elif args.task == "tsne":
-            evaluate_tsne_clustering(default_dir=args.default_dir, oof_dir=args.oof_dir, save_dir=args.save_dir)
-        else:
-            run_verification_suite(
-                default_dir=args.default_dir,
-                oof_dir=args.oof_dir,
-                save_dir=args.save_dir,
-                skip_visuals=args.skip_visuals,
-            )
+        dispatch_verification_task(
+            args.task,
+            results_root=args.results_root,
+            run_id=args.run_id,
+            save_dir=args.save_dir,
+            protocol=args.protocol,
+            skip_tsne=args.skip_visuals,
+        )
 
     elif args.command in ["all-in-one", "pipeline", "full-pipeline"]:
         config_paths = resolve_config_paths(args.configs)
-        train_mode = prompt_base_models_training(outputs_dir=args.outputs_dir)
+        train_mode = args.train_mode
         ensemble_mode = prompt_ensemble_mode(args.ensemble_mode)
 
         print("\n" + "=" * 80)
         print(f"  STEP 1/3: BASE MODELS BENCHMARK & REPORT GENERATION (MODE: {train_mode.upper()})")
         print("=" * 80 + "\n")
-        run_experiments(config_paths, mode=train_mode)
+        run_experiments(
+            config_paths, mode=train_mode, run_id=args.run_id,
+            results_root=args.results_root,
+        )
 
         print("\n" + "=" * 80)
         print(f"  STEP 2/3: ENSEMBLE EVALUATION PIPELINE (MODE: {ensemble_mode.upper()})")
         print("=" * 80 + "\n")
-        run_ensemble_evaluation(mode=ensemble_mode, outputs_dir=args.outputs_dir)
+        run_ensemble_evaluation(
+            protocol=canonical_protocol_from_mode(ensemble_mode),
+            results_root=args.results_root, run_id=args.run_id,
+        )
 
         print("\n" + "=" * 80)
         print("  STEP 3/3: SCIENTIFIC VERIFICATION & CALIBRATION SUITE")
         print("=" * 80 + "\n")
-        try:
-            run_verification_suite(save_dir="RESULTS/verification")
-        except Exception as e:
-            print(f"Warning: Verification suite encountered an issue: {e}")
+        run_verification_suite(
+            args.results_root, None, False, run_id=args.run_id
+        )
 
 
 if __name__ == "__main__":

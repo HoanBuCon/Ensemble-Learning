@@ -30,12 +30,30 @@ from src.engine.evaluator import evaluate_model
 from src.models.factory import create_model
 from src.utils.config import load_config
 from src.utils.reproducibility import set_seed
+from src.utils.provenance import load_dataset_manifest_sha256, require_git_commit, sha256_file
+from src.utils.run_identity import model_run_root, validate_run_id
+
+
+def select_evaluation_loader(split: str, val_loader, test_loader):
+    """Select exactly the requested split; cross-split fallback is forbidden."""
+    if split == "test":
+        if test_loader is None:
+            raise FileNotFoundError("Test split requested but no test loader exists")
+        return test_loader
+    if split == "val":
+        if val_loader is None:
+            raise FileNotFoundError("Validation split requested but no validation loader exists")
+        return val_loader
+    raise ValueError("split must be exactly 'val' or 'test'")
 
 
 def evaluate(
     config_path: str,
     checkpoint_path: Optional[str] = None,
     split: str = "test",
+    *,
+    run_id: str,
+    results_root: str = "RESULTS",
 ) -> Dict[str, Any]:
     """
     Evaluate a trained model and generate all reports.
@@ -49,7 +67,10 @@ def evaluate(
     Returns:
         Metrics dictionary.
     """
+    require_git_commit()
     config = load_config(config_path)
+    run_id = validate_run_id(run_id)
+    output_dir = str(model_run_root(results_root, run_id, "single_split", config.model.name))
     set_seed(config.seed)
 
     device = torch.device(config.device)
@@ -63,8 +84,9 @@ def evaluate(
 
     # Load checkpoint
     if checkpoint_path is None:
-        ckpt_manager = CheckpointManager(save_dir=config.checkpoint.save_dir)
+        ckpt_manager = CheckpointManager(save_dir=output_dir)
         ckpt = ckpt_manager.load_best(device=str(device))
+        checkpoint_path = os.path.join(output_dir, "best_model.pth")
     else:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
@@ -79,20 +101,24 @@ def evaluate(
     # Create dataloaders
     _, val_loader, test_loader, class_names = create_dataloaders(config)
 
-    if split == "test" and test_loader is not None:
-        dataloader = test_loader
-    else:
-        dataloader = val_loader
+    dataloader = select_evaluation_loader(split, val_loader, test_loader)
 
     # Evaluate
     metrics = evaluate_model(
         model=model,
         dataloader=dataloader,
         class_names=class_names,
-        output_dir=config.checkpoint.save_dir,
+        output_dir=output_dir,
         device=str(device),
         split=split,
         protocol="single_split",
+        method=config.model.name,
+        run_id=run_id,
+        dataset_manifest_sha256=load_dataset_manifest_sha256(),
+        config_sha256=sha256_file(config_path),
+        source_commit=require_git_commit(),
+        artifact_hashes={"checkpoint": sha256_file(checkpoint_path)},
+        aggregation_semantics="single_checkpoint_inference",
     )
 
     print(f"\n{'='*50}")
@@ -110,6 +136,11 @@ if __name__ == "__main__":
     parser.add_argument("config", help="Path to YAML config file")
     parser.add_argument("--checkpoint", default=None, help="Path to checkpoint")
     parser.add_argument("--split", default="test", choices=["test", "val"])
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--results-root", default="RESULTS")
 
     args = parser.parse_args()
-    evaluate(args.config, checkpoint_path=args.checkpoint, split=args.split)
+    evaluate(
+        args.config, checkpoint_path=args.checkpoint, split=args.split,
+        run_id=args.run_id, results_root=args.results_root,
+    )

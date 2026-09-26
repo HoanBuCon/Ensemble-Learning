@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Ensure project root is in sys.path
@@ -60,6 +61,10 @@ def generate_base_comparison_report(
     Returns:
         DataFrame containing formatted comparison metrics.
     """
+    if Path(outputs_dir).name.upper() == "RESULTS":
+        raise ValueError(
+            "Legacy comparison generator rejects canonical RESULTS; use canonical prediction records"
+        )
     # Discover candidate model directories
     if config_paths:
         model_dirs = []
@@ -68,6 +73,11 @@ def generate_base_comparison_report(
                 continue
             cfg = load_config(p)
             save_d = cfg.checkpoint.save_dir
+            if "RESULTS" in {part.upper() for part in Path(save_d).parts}:
+                raise ValueError(
+                    "Legacy comparison generator rejects canonical RESULTS config roots; "
+                    "use canonical prediction records"
+                )
             if os.path.isdir(save_d):
                 model_dirs.append(save_d)
     else:
@@ -187,7 +197,7 @@ def generate_base_comparison_report(
         row = {
             "Model": base_name,
             "Experiment": f"{m_name}_baseline",
-            "Best_Epoch": hist_info["best_epoch"],
+            "Best_Epoch": hist_info["accepted_checkpoint_epoch"],
             "Val_Accuracy": val_metrics["Val_Accuracy"],
             "Val_Precision": val_metrics["Val_Precision"],
             "Val_Recall": val_metrics["Val_Recall"],

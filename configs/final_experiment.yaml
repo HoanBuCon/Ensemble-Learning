@@ -5,19 +5,15 @@ dataset:
   snapshot: ./artifacts/manifests/dataset_snapshot.json
 
 results:
-  root: ./RESULTS/FINAL_V2
-  single_split: ./RESULTS/FINAL_V2/single_split
-  oof: ./RESULTS/FINAL_V2/oof
-  verification: ./RESULTS/FINAL_V2/verification
+  root: ./RESULTS
+  run_layout: ./RESULTS/runs/{run_id}
 
 protocol:
   seed: 42
   n_splits: 5
   shuffle: true
   split_random_state: 42
-  external_validation_names:
-    - val
-    - valid
+  external_validation_path: ./data/valid
 
 training_invariants:
   optimizer: adamw
@@ -39,4 +35,3 @@ latency:
   cpu_warmup: 20
   cpu_iterations: 100
   repeats: 5
-

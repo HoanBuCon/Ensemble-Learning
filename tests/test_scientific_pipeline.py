@@ -111,15 +111,15 @@ class ScientificPipelineTests(unittest.TestCase):
 
     def test_04_protocol_isolation(self) -> None:
         order = ["a", "b"]
-        single_fit, _, single_split = _protocol_paths("single_split", "R", order)
-        oof_fit, _, oof_split = _protocol_paths("oof", "R", order)
+        single_fit, _, single_split = _protocol_paths("single_split", "R", order, "run-a")
+        oof_fit, _, oof_split = _protocol_paths("oof", "R", order, "run-a")
         self.assertTrue(all("single_split" in path for path in single_fit.values()))
         self.assertTrue(all("/oof/" in path.replace("\\", "/") for path in oof_fit.values()))
         self.assertEqual(single_split, "val")
         self.assertEqual(oof_split, "oof_train")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "protocol"):
             run_ensemble_evaluation(
-                mode="oof", outputs_dir="RESULTS/OOF_TRAINING"
+                protocol="latest", results_root="RESULTS", run_id="run-a"
             )
 
     def test_05_sample_alignment_rejects_reordered_rows(self) -> None:
@@ -127,12 +127,15 @@ class ScientificPipelineTests(unittest.TestCase):
         first = PredictionArtifact(
             np.array(["a", "b", "c", "d"]), np.array([0, 1, 0, 1]),
             probs, probs.argmax(1), np.array(["a", "b"]),
-            "single_split", "m1", "test",
+            "single_split", "m1", "test", "run-a", "a" * 64, "b" * 64,
+            "c" * 40, {"checkpoint": "d" * 64}, "single_checkpoint_inference",
         )
         second = PredictionArtifact(
             np.array(["b", "a", "c", "d"]), np.array([1, 0, 0, 1]),
             probs[[1, 0, 2, 3]], probs[[1, 0, 2, 3]].argmax(1),
             np.array(["a", "b"]), "single_split", "m2", "test",
+            "run-a", "a" * 64, "e" * 64, "c" * 40,
+            {"checkpoint": "f" * 64}, "single_checkpoint_inference",
         )
         with self.assertRaisesRegex(ValueError, "sample_id ordering mismatch"):
             validate_prediction_alignment(
@@ -158,6 +161,11 @@ class ScientificPipelineTests(unittest.TestCase):
             evaluate_model(
                 ToyModel(), DataLoader(ToyDataset(), batch_size=2), ["a", "b"],
                 directory, device="cpu", split="val", protocol="single_split",
+                method="toy", run_id="run-a",
+                dataset_manifest_sha256="a" * 64,
+                config_sha256="b" * 64,
+                source_commit="c" * 40,
+                artifact_hashes={"checkpoint": "d" * 64},
             )
             root = Path(directory)
             self.assertTrue((root / "val_predictions.npz").is_file())

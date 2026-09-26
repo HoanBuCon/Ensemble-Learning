@@ -24,13 +24,14 @@ from torch.utils.data import DataLoader
 from scripts.verification.common_utils import (
     base_model_order,
     load_protocol_predictions,
-    verification_output_dir,
+    resolve_verification_output_dir,
 )
 from src.datasets.dataset import ImageFolderDataset
 from src.datasets.transforms import build_transforms
 from src.models.factory import create_model
 from src.utils.config import load_config
 from src.utils.provenance import write_json
+from src.utils.run_identity import final_run_root
 
 
 def feature_label(name: str, feature_source: str, matrix: np.ndarray) -> str:
@@ -41,8 +42,9 @@ def feature_label(name: str, feature_source: str, matrix: np.ndarray) -> str:
 def _probability_features(
     protocol: str,
     results_root: str,
+    run_id: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    base, _ = load_protocol_predictions(protocol, results_root=results_root)
+    base, _ = load_protocol_predictions(protocol, results_root=results_root, run_id=run_id)
     order = list(base)
     reference = base[order[0]]
     single = base["swin_tiny"].probabilities
@@ -53,9 +55,10 @@ def _probability_features(
 def _penultimate_features(
     results_root: str,
     device: torch.device,
+    run_id: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     protocol = "single_split"
-    base, _ = load_protocol_predictions(protocol, results_root=results_root)
+    base, _ = load_protocol_predictions(protocol, results_root=results_root, run_id=run_id)
     reference = next(iter(base.values()))
     order = base_model_order()
     config = load_config("configs/swin_tiny.yaml")
@@ -66,7 +69,7 @@ def _penultimate_features(
     loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=0)
     features: Dict[str, np.ndarray] = {}
     for model_name in order:
-        checkpoint = Path(results_root) / protocol / model_name / "best_model.pth"
+        checkpoint = final_run_root(results_root, run_id) / protocol / model_name / "best_model.pth"
         if not checkpoint.is_file():
             raise FileNotFoundError(
                 f"Deep-latent t-SNE requested but checkpoint is missing: {checkpoint}"
@@ -94,11 +97,12 @@ def _penultimate_features(
 def run_tsne_analysis(
     feature_source: str,
     protocol: str = "oof",
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
+    run_id: str = "",
 ) -> pd.DataFrame:
     if feature_source == "probability_vector":
-        single, ensemble, y_true, class_order = _probability_features(protocol, results_root)
+        single, ensemble, y_true, class_order = _probability_features(protocol, results_root, run_id)
     elif feature_source == "penultimate_embedding":
         if protocol != "single_split":
             raise ValueError(
@@ -106,7 +110,7 @@ def run_tsne_analysis(
                 "no OOF fold checkpoint may be selected implicitly"
             )
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        single, ensemble, y_true, class_order = _penultimate_features(results_root, device)
+        single, ensemble, y_true, class_order = _penultimate_features(results_root, device, run_id)
     else:
         raise ValueError(
             "feature_source must be 'probability_vector' or 'penultimate_embedding'"
@@ -131,7 +135,7 @@ def run_tsne_analysis(
             "calinski_harabasz_index": float(calinski_harabasz_score(matrix, y_true)),
         })
 
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     figure, axes = plt.subplots(1, 2, figsize=(18, 7.5))
     palette = ["#ef4444", "#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#06b6d4"]
@@ -174,9 +178,11 @@ if __name__ == "__main__":
         choices=["probability_vector", "penultimate_embedding"],
     )
     parser.add_argument("--protocol", choices=["single_split", "oof"], default="oof")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     run_tsne_analysis(
-        args.feature_source, args.protocol, args.results_root, args.save_dir
+        args.feature_source, args.protocol, args.results_root, args.save_dir,
+        run_id=args.run_id,
     )

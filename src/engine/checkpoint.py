@@ -72,6 +72,8 @@ class CheckpointManager:
         epoch: int = 0,
         metrics: Optional[Dict[str, Any]] = None,
         history: Optional[Dict[str, Any]] = None,
+        scaler: Optional[Any] = None,
+        early_stop_counter: int = 0,
     ) -> Dict[str, Any]:
         """Build a serializable state dictionary."""
         state: Dict[str, Any] = {
@@ -85,11 +87,15 @@ class CheckpointManager:
             "mode": self.mode,
             "loss_gate_tolerance": self.loss_gate_tolerance,
             "min_observed_val_loss": self.min_val_loss,
+            "early_stop_counter": int(early_stop_counter),
+            "resume_semantics": "logical_state_continuation_rng_not_persisted",
         }
         if optimizer is not None:
             state["optimizer_state_dict"] = optimizer.state_dict()
         if scheduler is not None:
             state["scheduler_state_dict"] = scheduler.state_dict()
+        if scaler is not None:
+            state["scaler_state_dict"] = scaler.state_dict()
         if metrics is not None:
             state["metrics"] = metrics
         if history is not None:
@@ -105,6 +111,8 @@ class CheckpointManager:
         epoch: int = 0,
         metrics: Optional[Dict[str, Any]] = None,
         history: Optional[Dict[str, Any]] = None,
+        scaler: Optional[Any] = None,
+        early_stop_counter: int = 0,
     ) -> bool:
         """
         Save checkpoint if ``current_metric`` improves on the best so far,
@@ -134,7 +142,8 @@ class CheckpointManager:
             if metrics is not None and "val_loss" in metrics:
                 self.best_val_loss = float(metrics["val_loss"])
             state = self._build_state(
-                model, optimizer, scheduler, epoch, metrics, history
+                model, optimizer, scheduler, epoch, metrics, history,
+                scaler, early_stop_counter,
             )
             path = os.path.join(self.save_dir, "best_model.pth")
             torch.save(state, path)
@@ -149,10 +158,13 @@ class CheckpointManager:
         epoch: int = 0,
         metrics: Optional[Dict[str, Any]] = None,
         history: Optional[Dict[str, Any]] = None,
+        scaler: Optional[Any] = None,
+        early_stop_counter: int = 0,
     ) -> None:
         """Save the most recent checkpoint (overwritten every epoch)."""
         state = self._build_state(
-            model, optimizer, scheduler, epoch, metrics, history
+            model, optimizer, scheduler, epoch, metrics, history,
+            scaler, early_stop_counter,
         )
         path = os.path.join(self.save_dir, "last_model.pth")
         torch.save(state, path)

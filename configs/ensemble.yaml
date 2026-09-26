@@ -1,4 +1,4 @@
-# Canonical ensemble configuration for FINAL_V2 scientific experiments.
+# Canonical ensemble configuration for provenance-linked scientific experiments.
 base_model_order:
   - densenet121
   - efficientnet_b0
@@ -32,4 +32,3 @@ stacking:
     objective: multi:softprob
     num_class: 6
     eval_metric: mlogloss
-

@@ -14,10 +14,10 @@ dataset:
   # Directory Paths
   data_root: "./data"
   train_dir: "./data/train"
-  val_dir: "./data/val"
+  val_dir: "./data/valid"
   test_dir: "./data/test"
 
-  # Class Identifiers (Must match folder names in data/train, data/val, data/test)
+  # Class Identifiers (Must match folder names in data/train, data/valid, data/test)
   classes:
     - "Brown_Blight"
     - "Gray_Blight"

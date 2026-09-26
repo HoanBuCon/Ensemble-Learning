@@ -19,7 +19,7 @@ from sklearn.metrics import cohen_kappa_score
 
 from scripts.verification.common_utils import (
     load_protocol_predictions,
-    verification_output_dir,
+    resolve_verification_output_dir,
 )
 
 
@@ -41,13 +41,14 @@ def compute_prob_ambiguity(probabilities: list[np.ndarray]) -> float:
 
 
 def evaluate_diversity(
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
+    run_id: str = "",
 ) -> pd.DataFrame:
     rows = []
     summaries = []
     for protocol in ("single_split", "oof"):
-        base, _ = load_protocol_predictions(protocol, results_root=results_root)
+        base, _ = load_protocol_predictions(protocol, results_root=results_root, run_id=run_id)
         names = list(base)
         reference = base[names[0]]
         for left, right in itertools.combinations(names, 2):
@@ -70,7 +71,7 @@ def evaluate_diversity(
             ),
         })
     frame = pd.DataFrame(rows)
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / "diversity_benchmark.csv", index=False)
     pd.DataFrame(summaries).to_csv(output / "diversity_summary.csv", index=False)
@@ -85,7 +86,8 @@ def evaluate_diversity(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay diversity metrics")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    evaluate_diversity(args.results_root, args.save_dir)
+    evaluate_diversity(args.results_root, args.save_dir, run_id=args.run_id)

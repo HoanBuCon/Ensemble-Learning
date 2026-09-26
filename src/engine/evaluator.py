@@ -102,6 +102,15 @@ def save_predictions(
     class_to_idx: Optional[Dict[str, int]] = None,
     split: str = "test",
     protocol: str = "single_split",
+    *,
+    method: str,
+    run_id: str,
+    dataset_manifest_sha256: str,
+    config_sha256: str,
+    source_commit: str,
+    artifact_hashes: Dict[str, str],
+    aggregation_semantics: str,
+    write_legacy_arrays: bool = False,
 ) -> None:
     """
     Save prediction arrays as ``.npy`` files for ensemble caching.
@@ -118,10 +127,11 @@ def save_predictions(
     os.makedirs(output_dir, exist_ok=True)
     prefix = f"{split}_" if split else ""
 
-    np.save(os.path.join(output_dir, f"{prefix}logits.npy"), logits)
-    np.save(os.path.join(output_dir, f"{prefix}probabilities.npy"), probabilities)
-    np.save(os.path.join(output_dir, f"{prefix}predictions.npy"), predictions)
-    np.save(os.path.join(output_dir, f"{prefix}labels.npy"), labels)
+    if write_legacy_arrays:
+        np.save(os.path.join(output_dir, f"{prefix}logits.npy"), logits)
+        np.save(os.path.join(output_dir, f"{prefix}probabilities.npy"), probabilities)
+        np.save(os.path.join(output_dir, f"{prefix}predictions.npy"), predictions)
+        np.save(os.path.join(output_dir, f"{prefix}labels.npy"), labels)
 
     if class_to_idx is not None:
         class_mapping_path = os.path.join(output_dir, f"{split}_class_to_idx.json")
@@ -141,8 +151,14 @@ def save_predictions(
         predictions=predictions,
         class_order=class_order,
         protocol=protocol,
-        method="base_model",
+        method=method,
         split=split,
+        run_id=run_id,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        config_sha256=config_sha256,
+        source_commit=source_commit,
+        artifact_hashes=artifact_hashes,
+        aggregation_semantics=aggregation_semantics,
     )
 
 
@@ -154,6 +170,14 @@ def evaluate_model(
     device: str = "cpu",
     split: str = "test",
     protocol: str = "single_split",
+    *,
+    method: str,
+    run_id: str,
+    dataset_manifest_sha256: str,
+    config_sha256: str,
+    source_commit: str,
+    artifact_hashes: Dict[str, str],
+    aggregation_semantics: str = "single_checkpoint_inference",
 ) -> Dict[str, Any]:
     """
     Full evaluation pipeline: inference → metrics → reports → saved artifacts.
@@ -191,6 +215,13 @@ def evaluate_model(
     save_predictions(
         logits, probabilities, predictions, labels, paths, output_dir,
         class_to_idx=class_to_idx, split=split, protocol=protocol,
+        method=method,
+        run_id=run_id,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        config_sha256=config_sha256,
+        source_commit=source_commit,
+        artifact_hashes=artifact_hashes,
+        aggregation_semantics=aggregation_semantics,
     )
 
     # Compute metrics

@@ -20,7 +20,7 @@ from scipy.stats import binomtest, norm
 from scripts.verification.common_utils import (
     ENSEMBLE_METHODS,
     load_protocol_predictions,
-    verification_output_dir,
+    resolve_verification_output_dir,
 )
 from src.utils.provenance import write_json
 
@@ -106,12 +106,13 @@ def compute_mcnemar_metrics(
 
 
 def run_mcnemar_analysis(
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
     family_alpha: float = 0.05,
+    run_id: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    _, single = load_protocol_predictions("single_split", results_root=results_root)
-    _, oof = load_protocol_predictions("oof", results_root=results_root)
+    _, single = load_protocol_predictions("single_split", results_root=results_root, run_id=run_id)
+    _, oof = load_protocol_predictions("oof", results_root=results_root, run_id=run_id)
     family_size = len(ENSEMBLE_METHODS)
     adjusted_alpha = family_alpha / family_size
     rows = []
@@ -141,7 +142,7 @@ def run_mcnemar_analysis(
         "posthoc_power_role": "supplementary_only_not_used_for_decision",
         "comparisons": details,
     }
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / "mcnemar_cross_protocol_matrix.csv", index=False)
     write_json(output / "mcnemar_test_results.json", summary)
@@ -159,8 +160,11 @@ def run_mcnemar_analysis(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay paired McNemar statistics")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
     parser.add_argument("--alpha", type=float, default=0.05)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    run_mcnemar_analysis(args.results_root, args.save_dir, args.alpha)
+    run_mcnemar_analysis(
+        args.results_root, args.save_dir, args.alpha, run_id=args.run_id
+    )

@@ -1,4 +1,4 @@
-"""Replay saved FINAL_V2 predictions for advanced metrics; never refit."""
+"""Replay saved canonical predictions for advanced metrics; never refit."""
 
 from __future__ import annotations
 
@@ -26,17 +26,18 @@ from sklearn.metrics import (
 
 from scripts.verification.common_utils import (
     load_protocol_predictions,
-    verification_output_dir,
+    resolve_verification_output_dir,
 )
 
 
 def evaluate_advanced_metrics(
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
+    run_id: str = "",
 ) -> pd.DataFrame:
     rows = []
     for protocol in ("single_split", "oof"):
-        base, ensembles = load_protocol_predictions(protocol, results_root=results_root)
+        base, ensembles = load_protocol_predictions(protocol, results_root=results_root, run_id=run_id)
         for method, artifact in {**base, **ensembles}.items():
             y_true = artifact.y_true
             predicted = artifact.predictions
@@ -56,7 +57,7 @@ def evaluate_advanced_metrics(
                 "Macro_ROC_AUC_OVR": roc_auc_score(one_hot, probabilities, average="macro", multi_class="ovr"),
             })
     frame = pd.DataFrame(rows)
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / "advanced_metrics_benchmark.csv", index=False)
     with (output / "advanced_metrics_benchmark.md").open("w", encoding="utf-8") as handle:
@@ -68,7 +69,8 @@ def evaluate_advanced_metrics(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay advanced metrics")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    evaluate_advanced_metrics(args.results_root, args.save_dir)
+    evaluate_advanced_metrics(args.results_root, args.save_dir, run_id=args.run_id)

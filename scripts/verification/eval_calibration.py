@@ -1,4 +1,4 @@
-"""Replay saved FINAL_V2 probabilities for calibration metrics; never refit."""
+"""Replay saved canonical probabilities for calibration metrics; never refit."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import pandas as pd
 
 from scripts.verification.common_utils import (
     load_protocol_predictions,
-    verification_output_dir,
+    resolve_verification_output_dir,
 )
 
 
@@ -48,12 +48,13 @@ def calc_nll(probs: np.ndarray, y_true: np.ndarray, eps: float = 1e-15) -> float
 
 
 def evaluate_all_calibration(
-    results_root: str = "RESULTS/FINAL_V2",
+    results_root: str = "RESULTS",
     save_dir: Optional[str] = None,
+    run_id: str = "",
 ) -> pd.DataFrame:
     rows = []
     for protocol in ("single_split", "oof"):
-        base, ensembles = load_protocol_predictions(protocol, results_root=results_root)
+        base, ensembles = load_protocol_predictions(protocol, results_root=results_root, run_id=run_id)
         for method, artifact in {**base, **ensembles}.items():
             rows.append({
                 "Protocol": protocol,
@@ -63,7 +64,7 @@ def evaluate_all_calibration(
                 "NLL": calc_nll(artifact.probabilities, artifact.y_true),
             })
     frame = pd.DataFrame(rows)
-    output = Path(save_dir) if save_dir else verification_output_dir(results_root)
+    output = resolve_verification_output_dir(results_root, run_id, save_dir)
     output.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / "calibration_benchmark.csv", index=False)
     with (output / "calibration_benchmark.md").open("w", encoding="utf-8") as handle:
@@ -75,7 +76,8 @@ def evaluate_all_calibration(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay calibration metrics")
-    parser.add_argument("--results-root", default="RESULTS/FINAL_V2")
+    parser.add_argument("--results-root", default="RESULTS")
     parser.add_argument("--save-dir", default=None)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    evaluate_all_calibration(args.results_root, args.save_dir)
+    evaluate_all_calibration(args.results_root, args.save_dir, run_id=args.run_id)

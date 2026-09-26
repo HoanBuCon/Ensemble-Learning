@@ -26,7 +26,7 @@ Usage::
     from src.utils.config import load_config
 
     config = load_config("configs/resnet50.yaml")
-    trainer = Trainer(config)
+    trainer = Trainer(config, run_id="paper-run", exact_save_dir="RESULTS/runs/paper-run/single_split/resnet50")
     results = trainer.train()
 """
 
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -58,41 +59,13 @@ from src.utils.logger import (
     setup_logger,
 )
 from src.utils.reproducibility import set_seed
+from src.utils.provenance import (
+    load_dataset_manifest_sha256,
+    require_git_commit,
+    sha256_file,
+)
+from src.utils.run_identity import prepare_exact_run_directory, validate_run_id
 from src.utils.visualization import plot_training_curves
-
-
-def resolve_save_dir(base_save_dir: str, resume: bool = False) -> str:
-    """
-    Resolve the save directory for an experiment.
-
-    - If resuming: finds the latest existing save directory (e.g. outputs/resnet50 or outputs/resnet50_1).
-    - If training from scratch:
-      - If base_save_dir is empty or does not exist: returns base_save_dir.
-      - If base_save_dir contains existing run files: creates/returns base_save_dir_1, base_save_dir_2, etc.
-    """
-    if resume:
-        if not os.path.exists(base_save_dir):
-            return base_save_dir
-        counter = 1
-        latest_dir = base_save_dir
-        while True:
-            candidate = f"{base_save_dir}_{counter}"
-            if os.path.exists(candidate) and os.path.exists(os.path.join(candidate, "last_model.pth")):
-                latest_dir = candidate
-                counter += 1
-            else:
-                break
-        return latest_dir
-
-    if not os.path.exists(base_save_dir) or not os.listdir(base_save_dir):
-        return base_save_dir
-
-    counter = 1
-    while True:
-        candidate = f"{base_save_dir}_{counter}"
-        if not os.path.exists(candidate) or not os.listdir(candidate):
-            return candidate
-        counter += 1
 
 
 class Trainer:
@@ -112,16 +85,24 @@ class Trainer:
         self,
         config: ExperimentConfig | str,
         resume: bool = False,
+        *,
+        run_id: str,
+        exact_save_dir: str,
     ) -> None:
-        if isinstance(config, str):
-            config = load_config(config)
+        if not isinstance(config, str):
+            raise TypeError(
+                "Scientific Trainer requires a config path so config_sha256 is immutable"
+            )
+        self.config_path = config
+        config = load_config(config)
 
         self.config = config
         self.device = torch.device(config.device)
         self.is_resume = resume
-
-        # Auto-increment save directory for scratch runs to prevent overwriting old runs
-        self.save_dir = resolve_save_dir(config.checkpoint.save_dir, resume=self.is_resume)
+        self.run_id = validate_run_id(run_id)
+        self.save_dir = str(
+            prepare_exact_run_directory(Path(exact_save_dir), resume=self.is_resume)
+        )
         self.config.checkpoint.save_dir = self.save_dir
 
         # Reproducibility
@@ -321,12 +302,14 @@ class Trainer:
         if "history" in ckpt and isinstance(ckpt["history"], dict):
             self.history = ckpt["history"]
 
-        # Restore best metric value
-        best_ckpt_path = os.path.join(save_dir, "best_model.pth")
-        if os.path.exists(best_ckpt_path):
-            best_ckpt = self.ckpt_manager.load_best(device=str(self.device))
-            self.ckpt_manager.restore_tracking(best_ckpt)
-            self._best_metric = self.ckpt_manager.best_value
+        # The last checkpoint owns continuation state. Do not combine its
+        # optimizer/scheduler/history with selection tracking from another epoch.
+        self.ckpt_manager.restore_tracking(ckpt)
+        self._best_metric = self.ckpt_manager.best_value
+        self._early_stop_counter = int(ckpt.get("early_stop_counter", 0))
+        scaler_state = ckpt.get("scaler_state_dict")
+        if scaler_state is not None and self.scaler is not None:
+            self.scaler.load_state_dict(scaler_state)
 
         last_epoch = ckpt.get("epoch", 0)
         start_epoch = last_epoch + 1
@@ -486,6 +469,8 @@ class Trainer:
                     epoch=epoch,
                     metrics=metrics_snapshot,
                     history=self.history,
+                    scaler=self.scaler,
+                    early_stop_counter=0,
                 )
                 if is_best:
                     accepted_checkpoint_epoch = epoch
@@ -493,6 +478,13 @@ class Trainer:
                         f"New best {cfg.checkpoint.monitor}: {current_metric:.4f} "
                         f"(epoch {epoch})"
                     )
+
+            # --- Early stopping (Guarded by Loss-Gate) ---
+            if is_best:
+                self._best_metric = current_metric
+                self._early_stop_counter = 0
+            else:
+                self._early_stop_counter += 1
 
             if cfg.checkpoint.save_last:
                 self.ckpt_manager.save_last(
@@ -502,20 +494,16 @@ class Trainer:
                     epoch=epoch,
                     metrics=metrics_snapshot,
                     history=self.history,
+                    scaler=self.scaler,
+                    early_stop_counter=self._early_stop_counter,
                 )
 
-            # --- Early stopping (Guarded by Loss-Gate) ---
-            if is_best:
-                self._best_metric = current_metric
-                self._early_stop_counter = 0
-            else:
-                self._early_stop_counter += 1
-                if self._early_stop_counter >= cfg.train.early_stopping_patience:
-                    self.logger.info(
-                        f"Early stopping triggered at epoch {epoch} "
-                        f"(patience={cfg.train.early_stopping_patience})"
-                    )
-                    break
+            if self._early_stop_counter >= cfg.train.early_stopping_patience:
+                self.logger.info(
+                    f"Early stopping triggered at epoch {epoch} "
+                    f"(patience={cfg.train.early_stopping_patience})"
+                )
+                break
 
         # --- Post-training ---
         total_time = time.time() - global_start
@@ -659,7 +647,9 @@ class Trainer:
         Returns:
             Tuple of ``(logits, probabilities, predictions)``.
         """
-        dl = dataloader or self.test_loader or self.val_loader
+        if dataloader is None and self.test_loader is None:
+            raise FileNotFoundError("Default prediction requires the configured test split")
+        dl = dataloader if dataloader is not None else self.test_loader
         logits, probs, preds, _, _, _ = run_inference(
             self.model, dl, str(self.device)
         )
@@ -677,8 +667,10 @@ class Trainer:
             dataloader: DataLoader to run inference on. Defaults to test_loader.
             output_dir: Directory for .npy files. Defaults to checkpoint dir.
         """
-        dl = dataloader or self.test_loader or self.val_loader
-        split_name = "test" if (dl == self.test_loader and self.test_loader is not None) else "val"
+        if dataloader is None and self.test_loader is None:
+            raise FileNotFoundError("Default prediction export requires the configured test split")
+        dl = dataloader if dataloader is not None else self.test_loader
+        split_name = "test" if (dl is self.test_loader and self.test_loader is not None) else "val"
         out = output_dir or self.config.checkpoint.save_dir
 
         dataset = getattr(dl, "dataset", None)
@@ -690,6 +682,13 @@ class Trainer:
         save_predictions(
             logits, probs, preds, labels, paths, out,
             class_to_idx=class_to_idx, split=split_name, protocol="single_split",
+            method=self.config.model.name,
+            run_id=self.run_id,
+            dataset_manifest_sha256=load_dataset_manifest_sha256(),
+            config_sha256=sha256_file(self.config_path),
+            source_commit=require_git_commit(),
+            artifact_hashes={"checkpoint": sha256_file(os.path.join(self.save_dir, "best_model.pth"))},
+            aggregation_semantics="single_checkpoint_inference",
         )
         self.logger.info(f"Predictions ({split_name} split) saved to {out}")
 
@@ -708,8 +707,10 @@ class Trainer:
         Returns:
             Metrics dictionary.
         """
-        dl = dataloader or self.test_loader or self.val_loader
-        split_name = "test" if (dl == self.test_loader and self.test_loader is not None) else "val"
+        if dataloader is None and self.test_loader is None:
+            raise FileNotFoundError("Default evaluation requires the configured test split")
+        dl = dataloader if dataloader is not None else self.test_loader
+        split_name = "test" if (dl is self.test_loader and self.test_loader is not None) else "val"
         out = output_dir or self.config.checkpoint.save_dir
 
         return evaluate_model(
@@ -720,6 +721,13 @@ class Trainer:
             device=str(self.device),
             split=split_name,
             protocol="single_split",
+            method=self.config.model.name,
+            run_id=self.run_id,
+            dataset_manifest_sha256=load_dataset_manifest_sha256(),
+            config_sha256=sha256_file(self.config_path),
+            source_commit=require_git_commit(),
+            artifact_hashes={"checkpoint": sha256_file(os.path.join(self.save_dir, "best_model.pth"))},
+            aggregation_semantics="single_checkpoint_inference",
         )
 
     def load_best_model(self) -> None:

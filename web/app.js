@@ -250,10 +250,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (ctxBenchmark && modelKeys.length > 0) {
                 if (chartInstanceBenchmark) chartInstanceBenchmark.destroy();
 
-                const accuracies = modelKeys.map(k => baseModels[k]?.accuracy || 0);
-                const precisions = modelKeys.map(k => baseModels[k]?.precision || 0);
-                const recalls = modelKeys.map(k => baseModels[k]?.recall || 0);
-                const f1s = modelKeys.map(k => baseModels[k]?.f1_score || 0);
+                const accuracies = modelKeys.map(k => baseModels[k]?.accuracy ?? null);
+                const precisions = modelKeys.map(k => baseModels[k]?.precision ?? null);
+                const recalls = modelKeys.map(k => baseModels[k]?.recall ?? null);
+                const f1s = modelKeys.map(k => baseModels[k]?.f1_score ?? null);
 
                 chartInstanceBenchmark = new Chart(ctxBenchmark, {
                     type: 'bar',
@@ -554,6 +554,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderTablesAndVerification(data, isLight) {
         if (!data) return;
+        const formatPercent = value => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : '-';
+        const formatMetric = (value, digits = 4) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '-';
         const textColor = isLight ? '#0f172a' : '#f8fafc';
         const subTextColor = isLight ? '#475569' : '#94a3b8';
         const gridColor = isLight ? 'rgba(15, 23, 42, 0.08)' : 'rgba(255, 255, 255, 0.08)';
@@ -565,7 +567,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const protoText = (data.protocol === 'oof') ? '5-Fold OOF Protocol' : 'Single-Split Protocol';
         const baseCardTitle = document.querySelector('#analyticsTabBaseModels .chart-card-full .chart-card-title');
         if (baseCardTitle) {
-            baseCardTitle.innerHTML = `<i class="fa-solid fa-table-list" style="color: var(--cyan-color);"></i> Base Models Exhaustive Benchmark Table <span class="table-pill ${data.protocol === 'oof' ? 'green' : 'blue'}" style="margin-left: 8px;">${protoText}</span> (Test Set N = 1,546)`;
+            baseCardTitle.innerHTML = `<i class="fa-solid fa-table-list" style="color: var(--cyan-color);"></i> Base Models Benchmark Table <span class="table-pill ${data.protocol === 'oof' ? 'green' : 'blue'}" style="margin-left: 8px;">${protoText}</span>`;
         }
         const ensCardTitle = document.querySelector('#analyticsTabEnsembleMethods .chart-card-full .chart-card-title');
         if (ensCardTitle) {
@@ -582,15 +584,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${m.name || k}</strong></td>
-                    <td><strong>${(m.accuracy || 0).toFixed(2)}%</strong></td>
-                    <td>${(m.f1_score || 0).toFixed(2)}%</td>
-                    <td>${(m.precision || 0).toFixed(2)}%</td>
-                    <td>${(m.recall || 0).toFixed(2)}%</td>
-                    <td>${m.weighted_f1 ? m.weighted_f1.toFixed(2) + '%' : '-'}</td>
-                    <td>${m.kappa ? m.kappa.toFixed(4) : '-'}</td>
-                    <td>${m.ece ? m.ece.toFixed(4) : '-'}</td>
-                    <td>${m.brier ? m.brier.toFixed(4) : '-'}</td>
-                    <td>${m.nll ? m.nll.toFixed(4) : '-'}</td>
+                    <td><strong>${formatPercent(m.accuracy)}</strong></td>
+                    <td>${formatPercent(m.f1_score)}</td>
+                    <td>${formatPercent(m.precision)}</td>
+                    <td>${formatPercent(m.recall)}</td>
+                    <td>${formatPercent(m.weighted_f1)}</td>
+                    <td>${formatMetric(m.kappa)}</td>
+                    <td>${formatMetric(m.ece)}</td>
+                    <td>${formatMetric(m.brier)}</td>
+                    <td>${formatMetric(m.nll)}</td>
                 `;
                 baseTbody.appendChild(tr);
             });
@@ -603,21 +605,21 @@ document.addEventListener('DOMContentLoaded', () => {
             Object.keys(ensembleModels).forEach(k => {
                 const m = ensembleModels[k];
                 if (!m) return;
-                const imp = m.improvement || 0;
-                const gainStr = imp > 0 ? `+${imp.toFixed(2)}%` : `${imp.toFixed(2)}%`;
-                const gainStyle = imp > 0 ? 'color: var(--success-color); font-weight: 700;' : 'color: var(--subtext-color);';
+                const imp = Number.isFinite(Number(m.improvement)) ? Number(m.improvement) : null;
+                const gainStr = imp == null ? '-' : (imp > 0 ? `+${imp.toFixed(2)}%` : `${imp.toFixed(2)}%`);
+                const gainStyle = imp != null && imp > 0 ? 'color: var(--success-color); font-weight: 700;' : 'color: var(--subtext-color);';
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${m.name || k}</strong></td>
                     <td><span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #34d399;">${m.type || 'Ensemble'}</span></td>
-                    <td><strong style="color: var(--accent-color);">${(m.accuracy || 0).toFixed(2)}%</strong></td>
-                    <td>${(m.f1_score || 0).toFixed(2)}%</td>
-                    <td>${(m.precision || 0).toFixed(2)}%</td>
-                    <td>${(m.recall || 0).toFixed(2)}%</td>
+                    <td><strong style="color: var(--accent-color);">${formatPercent(m.accuracy)}</strong></td>
+                    <td>${formatPercent(m.f1_score)}</td>
+                    <td>${formatPercent(m.precision)}</td>
+                    <td>${formatPercent(m.recall)}</td>
                     <td style="${gainStyle}">${gainStr}</td>
-                    <td>${m.ece ? m.ece.toFixed(4) : '-'}</td>
-                    <td>${m.brier ? m.brier.toFixed(4) : '-'}</td>
-                    <td>${m.nll ? m.nll.toFixed(4) : '-'}</td>
+                    <td>${formatMetric(m.ece)}</td>
+                    <td>${formatMetric(m.brier)}</td>
+                    <td>${formatMetric(m.nll)}</td>
                 `;
                 ensTbody.appendChild(tr);
             });
@@ -628,17 +630,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const verifBestBrierEl = document.getElementById('verifBestBrier');
         const verifBestNllEl = document.getElementById('verifBestNll');
         const verifAmbiguityRatioEl = document.getElementById('verifAmbiguityRatio');
-        const isOofMode = (data.protocol === 'oof');
-        if (verifBestEceEl) verifBestEceEl.textContent = isOofMode ? '0.0079 (< 0.8%)' : '0.0099 (< 1.0%)';
-        if (verifBestBrierEl) verifBestBrierEl.textContent = isOofMode ? '0.0397 (-41.4%)' : '0.0400 (-41.0%)';
-        if (verifBestNllEl) verifBestNllEl.textContent = isOofMode ? '0.0873' : '0.0947';
-        if (verifAmbiguityRatioEl) verifAmbiguityRatioEl.textContent = verif.ambiguity_ratio || '2.211x';
+        const calibrationRows = (verif.calibration_table || []).filter(
+            row => String(row.Protocol || '').toLowerCase() === String(data.protocol || '').toLowerCase()
+        );
+        const finiteMinimum = key => {
+            const values = calibrationRows.map(row => Number(row[key])).filter(Number.isFinite);
+            return values.length ? Math.min(...values).toFixed(4) : 'No provenance-linked result available';
+        };
+        if (verifBestEceEl) verifBestEceEl.textContent = finiteMinimum('ECE_15_bins');
+        if (verifBestBrierEl) verifBestBrierEl.textContent = finiteMinimum('Brier_score');
+        if (verifBestNllEl) verifBestNllEl.textContent = finiteMinimum('NLL');
+        if (verifAmbiguityRatioEl) verifAmbiguityRatioEl.textContent = verif.ambiguity_ratio || 'No provenance-linked result available';
 
         // 4. Verification Diversity Summary Bar
         const globDisSingleEl = document.getElementById('globDisSingle');
         const globDisOofEl = document.getElementById('globDisOof');
-        if (globDisSingleEl) globDisSingleEl.textContent = verif.global_disagreement_single || '5.89%';
-        if (globDisOofEl) globDisOofEl.textContent = verif.global_disagreement_oof || '4.20%';
+        if (globDisSingleEl) globDisSingleEl.textContent = verif.global_disagreement_single || 'No provenance-linked result available';
+        if (globDisOofEl) globDisOofEl.textContent = verif.global_disagreement_oof || 'No provenance-linked result available';
 
         // 5. Verification Diversity Table (#diversityTable tbody)
         const divTbody = document.querySelector('#diversityTable tbody');
@@ -678,12 +686,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const mcnPval = document.getElementById('mcnPval');
         const mcnConclusion = document.getElementById('mcnConclusion');
 
-        if (cntN11) cntN11.textContent = cm.n11_both_correct ? cm.n11_both_correct.toLocaleString() : '1,505';
-        if (cntN10) cntN10.textContent = cm.n10_single_correct_oof_wrong != null ? cm.n10_single_correct_oof_wrong : '7';
-        if (cntN01) cntN01.textContent = cm.n01_oof_correct_single_wrong != null ? cm.n01_oof_correct_single_wrong : '4';
-        if (cntN00) cntN00.textContent = cm.n00_both_wrong != null ? cm.n00_both_wrong : '30';
-        if (mcnChi2) mcnChi2.innerHTML = `&chi;² = ${(mcn.mcnemar_chi2 || 0.3636).toFixed(4)}`;
-        if (mcnPval) mcnPval.innerHTML = `p = ${(mcn.exact_binomial_p_value || 0.5488).toFixed(4)} (&gg; 0.05)`;
+        if (cntN11) cntN11.textContent = cm.n11_both_correct != null ? cm.n11_both_correct.toLocaleString() : '-';
+        if (cntN10) cntN10.textContent = cm.n10_single_correct_oof_wrong != null ? cm.n10_single_correct_oof_wrong : '-';
+        if (cntN01) cntN01.textContent = cm.n01_oof_correct_single_wrong != null ? cm.n01_oof_correct_single_wrong : '-';
+        if (cntN00) cntN00.textContent = cm.n00_both_wrong != null ? cm.n00_both_wrong : '-';
+        if (mcnChi2) mcnChi2.textContent = Number.isFinite(Number(mcn.mcnemar_chi2)) ? `chi-square = ${Number(mcn.mcnemar_chi2).toFixed(4)}` : 'No provenance-linked result available';
+        if (mcnPval) mcnPval.textContent = Number.isFinite(Number(mcn.exact_binomial_p_value)) ? `p = ${Number(mcn.exact_binomial_p_value).toFixed(4)}` : 'No provenance-linked result available';
         if (mcnConclusion && mcn.conclusion) {
             mcnConclusion.innerHTML = `<i class="fa-solid fa-circle-check"></i> ${mcn.conclusion}`;
         }
@@ -695,25 +703,23 @@ document.addEventListener('DOMContentLoaded', () => {
             const matrixRows = verif.cross_protocol_matrix || mcn.cross_protocol_matrix || [];
             if (matrixRows.length > 0) {
                 matrixRows.forEach(r => {
-                    const ensName = r['Ensemble Method'] || r['ensemble_method'] || '';
-                    const sAcc = r['Single-Split Acc (%)'] || r['single_acc'] || '-';
-                    const oAcc = r['5-Fold OOF Acc (%)'] || r['oof_acc'] || '-';
-                    const rd = r['Risk Difference (RD) [95% CI]'] || r['rd_ci'] || '-';
-                    const hVal = r["Cohen's h"] != null ? Number(r["Cohen's h"]).toFixed(3) : '-';
-                    const disc = r['Discordant (n10 / n01)'] || r['discordant'] || '-';
-                    const chi2 = r['McNemar Chi2'] != null ? Number(r['McNemar Chi2']).toFixed(4) : '-';
-                    const pVal = r['Exact p-value'] != null ? Number(r['Exact p-value']).toFixed(4) : '-';
-                    const bonf = r['Bonferroni (α=0.0083)'] || (Number(pVal) > 0.0083 ? 'Fail to reject H0' : 'Reject H0');
-                    const power = r['Statistical Power'] || '-';
-                    const dec = r['Scientific Decision'] || 'Không có khác biệt có ý nghĩa thống kê';
+                    const ensName = r.method || '-';
+                    const sAcc = Number.isFinite(Number(r.accuracy_a)) ? `${(Number(r.accuracy_a) * 100).toFixed(3)}%` : '-';
+                    const oAcc = Number.isFinite(Number(r.accuracy_b)) ? `${(Number(r.accuracy_b) * 100).toFixed(3)}%` : '-';
+                    const rd = Number.isFinite(Number(r.paired_risk_difference))
+                        ? `${Number(r.paired_risk_difference).toFixed(6)} [${Number(r.paired_risk_difference_ci_low).toFixed(6)}, ${Number(r.paired_risk_difference_ci_high).toFixed(6)}]`
+                        : '-';
+                    const hVal = Number.isFinite(Number(r.marginal_accuracy_cohens_h)) ? Number(r.marginal_accuracy_cohens_h).toFixed(3) : '-';
+                    const disc = r.discordant != null ? `${r.n10_a_correct_b_wrong} / ${r.n01_a_wrong_b_correct}` : '-';
+                    const chi2 = Number.isFinite(Number(r.edwards_corrected_chi_square)) ? Number(r.edwards_corrected_chi_square).toFixed(4) : '-';
+                    const pVal = Number.isFinite(Number(r.exact_binomial_p_value)) ? Number(r.exact_binomial_p_value).toFixed(6) : '-';
+                    const bonf = r.decision || '-';
+                    const power = Number.isFinite(Number(r.supplementary_posthoc_power)) ? Number(r.supplementary_posthoc_power).toFixed(4) : '-';
+                    const dec = r.decision || '-';
 
-                    const pBadge = Number(pVal) > 0.05 
-                        ? `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: 600;">p = ${pVal} (&gt; 0.05)</span>`
-                        : `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-weight: 600;">p = ${pVal} (&le; 0.05)</span>`;
+                    const pBadge = `<span class="badge" style="font-weight: 600;">p = ${pVal}</span>`;
 
-                    const bonfBadge = bonf.includes('Fail') 
-                        ? `<span class="badge" style="background: rgba(59, 130, 246, 0.15); color: #3b82f6; font-size: 0.75rem;">p &gt; 0.0083 (Pass)</span>`
-                        : `<span class="badge" style="background: rgba(239, 68, 68, 0.15); color: #ef4444; font-size: 0.75rem;">p &le; 0.0083 (Sig)</span>`;
+                    const bonfBadge = `<span class="badge" style="font-size: 0.75rem;">${bonf}</span>`;
 
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
@@ -744,15 +750,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const calibRows = verif.calibration_table;
                 const modelNamesOrder = [
-                    "Base Model (resnet50)",
-                    "Base Model (densenet121)",
-                    "Base Model (efficientnet_b0)",
-                    "Base Model (swin_tiny)",
-                    "Soft Voting Ensemble",
-                    "Hard Voting Ensemble",
-                    "Stacking (Logistic Regression)",
-                    "Stacking (Random Forest)",
-                    "Stacking (XGBoost)"
+                    "resnet50", "densenet121", "efficientnet_b0", "swin_tiny",
+                    "hard_voting", "soft_voting", "weighted_voting",
+                    "stacking_logistic_regression", "stacking_random_forest", "stacking_xgboost"
                 ];
 
                 const displayNames = [
@@ -760,8 +760,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     "DenseNet-121",
                     "EfficientNet-B0",
                     "Swin-Tiny",
-                    "Soft Voting",
                     "Hard Voting",
+                    "Soft Voting",
+                    "Weighted Voting",
                     "Stacking (LR)",
                     "Stacking (RF)",
                     "Stacking (XGB)"
@@ -771,11 +772,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const oofEce = [];
 
                 modelNamesOrder.forEach(m => {
-                    const cleanKey = m.replace("Base Model (", "").replace(")", "").toLowerCase();
-                    const sRow = calibRows.find(r => (r.Protocol === "Single-Split" || r.Protocol === "single") && (String(r["Model / Ensemble"] || '').toLowerCase().includes(cleanKey)));
-                    const oRow = calibRows.find(r => (r.Protocol === "5-Fold OOF" || r.Protocol === "oof") && (String(r["Model / Ensemble"] || '').toLowerCase().includes(cleanKey)));
-                    singleEce.push(sRow ? parseFloat(sRow["ECE (15 bins)"] || sRow.ece || 0) : 0);
-                    oofEce.push(oRow ? parseFloat(oRow["ECE (15 bins)"] || oRow.ece || 0) : 0);
+                    const sRow = calibRows.find(r => r.Protocol === "single_split" && r.Method === m);
+                    const oRow = calibRows.find(r => r.Protocol === "oof" && r.Method === m);
+                    singleEce.push(sRow && Number.isFinite(Number(sRow.ECE_15_bins)) ? Number(sRow.ECE_15_bins) : null);
+                    oofEce.push(oRow && Number.isFinite(Number(oRow.ECE_15_bins)) ? Number(oRow.ECE_15_bins) : null);
                 });
 
                 chartInstanceEce = new Chart(ctxEce, {
@@ -791,7 +791,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 borderWidth: 1.5
                             },
                             {
-                                label: '5-Fold OOF (ECE - Optimal)',
+                                label: '5-Fold OOF (ECE)',
                                 data: oofEce,
                                 backgroundColor: 'rgba(16, 185, 129, 0.85)',
                                 borderColor: '#10b981',
@@ -834,20 +834,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const calibRows = verif.calibration_table;
                 const isOof = (data.protocol === 'oof');
-                const targetProto = isOof ? "5-Fold OOF" : "Single-Split";
-                const protoShort = isOof ? "oof" : "single";
+                const targetProto = isOof ? "oof" : "single_split";
 
                 const ensModels = [
-                    "Soft Voting Ensemble",
-                    "Hard Voting Ensemble",
-                    "Stacking (Logistic Regression)",
-                    "Stacking (Random Forest)",
-                    "Stacking (XGBoost)"
+                    "hard_voting", "soft_voting", "weighted_voting",
+                    "stacking_logistic_regression", "stacking_random_forest", "stacking_xgboost"
                 ];
 
                 const ensLabels = [
-                    "Soft Voting",
                     "Hard Voting",
+                    "Soft Voting",
+                    "Weighted Voting",
                     "Stacking LR",
                     "Stacking RF",
                     "Stacking XGB"
@@ -857,33 +854,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const nllScores = [];
 
                 ensModels.forEach(m => {
-                    const clean = m.toLowerCase();
-                    const row = calibRows.find(r => {
-                        const p = String(r.Protocol || '').trim();
-                        const matchesProto = (p === targetProto || p.toLowerCase().includes(protoShort));
-                        const mName = String(r["Model / Ensemble"] || r.model_name || '').toLowerCase();
-                        
-                        let nameMatch = false;
-                        if (clean.includes('soft voting')) nameMatch = mName.includes('soft voting');
-                        else if (clean.includes('hard voting')) nameMatch = mName.includes('hard voting');
-                        else if (clean.includes('logistic')) nameMatch = mName.includes('logistic');
-                        else if (clean.includes('random forest')) nameMatch = mName.includes('random forest');
-                        else if (clean.includes('xgboost')) nameMatch = mName.includes('xgboost') || mName.includes('xgb');
-                        else nameMatch = mName.includes(clean);
-
-                        return matchesProto && nameMatch;
-                    }) || calibRows.find(r => {
-                        const mName = String(r["Model / Ensemble"] || r.model_name || '').toLowerCase();
-                        if (clean.includes('logistic')) return mName.includes('logistic');
-                        if (clean.includes('random forest')) return mName.includes('random forest');
-                        if (clean.includes('xgboost')) return mName.includes('xgboost') || mName.includes('xgb');
-                        if (clean.includes('soft voting')) return mName.includes('soft voting');
-                        if (clean.includes('hard voting')) return mName.includes('hard voting');
-                        return mName.includes(clean);
-                    });
-
-                    brierScores.push(row ? parseFloat(row["Brier Score"] || row.brier || 0) : 0);
-                    nllScores.push(row ? parseFloat(row["NLL"] || row.nll || 0) : 0);
+                    const row = calibRows.find(r => r.Protocol === targetProto && r.Method === m);
+                    brierScores.push(row && Number.isFinite(Number(row.Brier_score)) ? Number(row.Brier_score) : null);
+                    nllScores.push(row && Number.isFinite(Number(row.NLL)) ? Number(row.NLL) : null);
                 });
 
                 chartInstanceBrierNll = new Chart(ctxBrierNll, {
@@ -1086,7 +1059,7 @@ document.addEventListener('DOMContentLoaded', () => {
         badgeStats.textContent = '0 Images';
         resultsContainer.innerHTML = `
             <p style="color: var(--text-secondary); text-align: center; padding: 4rem 0;">
-                Select a mode, upload images, and click "Run Classification Pipeline" to view real-time results.
+                Select a mode, upload images, and click "Run Classification Pipeline" to view inference results.
             </p>
         `;
     });
@@ -1210,14 +1183,14 @@ document.addEventListener('DOMContentLoaded', () => {
                                     <div class="dual-consensus-card single">
                                         <div class="dual-consensus-card-header">
                                             <span class="dual-consensus-title"><i class="fa-solid fa-bolt"></i> Single-Split Consensus</span>
-                                            <span class="proto-tag single">1,540 Val Meta</span>
+                                            <span class="proto-tag single">Validation-fitted meta</span>
                                         </div>
                                         <div class="dual-consensus-val" style="color: var(--cyan-color);">${item.single_consensus || 'N/A'}</div>
                                     </div>
                                     <div class="dual-consensus-card oof">
                                         <div class="dual-consensus-card-header">
                                             <span class="dual-consensus-title"><i class="fa-solid fa-arrows-rotate"></i> 5-Fold OOF Consensus</span>
-                                            <span class="proto-tag oof">7,192 OOF Meta</span>
+                                            <span class="proto-tag oof">Cross-fitted OOF meta</span>
                                         </div>
                                         <div class="dual-consensus-val" style="color: var(--accent-color);">${item.oof_consensus || 'N/A'}</div>
                                     </div>
