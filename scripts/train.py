@@ -22,7 +22,14 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.engine.trainer import Trainer
-from src.utils.provenance import require_git_commit, verify_dataset_snapshot, write_experiment_manifest
+from src.utils.provenance import (
+    load_dataset_manifest_sha256,
+    require_git_commit,
+    sha256_file,
+    validate_run_start_manifest,
+    verify_dataset_snapshot,
+    write_experiment_manifest,
+)
 from src.utils.run_identity import model_run_root, validate_run_id
 
 
@@ -43,7 +50,7 @@ def train(
     Returns:
         Dictionary with training results (best accuracy, timing, etc.).
     """
-    require_git_commit()
+    source_commit = require_git_commit()
     verify_dataset_snapshot()
     validated_run_id = validate_run_id(run_id)
     from src.utils.config import load_config
@@ -56,8 +63,32 @@ def train(
         resume=resume,
         run_id=validated_run_id,
         exact_save_dir=str(exact_output),
+        source_commit=source_commit,
     )
     config = trainer.config
+
+    # Establish immutable run identity before the interruptible epoch loop.
+    run_start_path = os.path.join(trainer.save_dir, "run_start_manifest.json")
+    if resume:
+        validate_run_start_manifest(
+            run_start_path,
+            run_id=validated_run_id,
+            protocol="single_split",
+            model=config.model.name,
+            config_sha256=sha256_file(config_path),
+            dataset_manifest_sha256=load_dataset_manifest_sha256(),
+            source_commit=source_commit,
+        )
+    else:
+        write_experiment_manifest(
+            run_start_path,
+            protocol="single_split",
+            model=config.model.name,
+            config_path=config_path,
+            seed=config.seed,
+            arguments={"resume": resume, "lifecycle": "STARTED"},
+            run_id=validated_run_id,
+        )
 
     # Train
     results = trainer.train()

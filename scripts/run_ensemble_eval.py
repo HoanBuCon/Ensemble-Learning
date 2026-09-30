@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 from pathlib import Path
@@ -34,7 +35,13 @@ from src.utils.provenance import (
     write_experiment_manifest,
     write_json,
 )
-from src.utils.run_identity import final_run_root, validate_run_id, validate_protocol
+from src.utils.config import load_config as load_experiment_config
+from src.utils.run_identity import (
+    final_run_root,
+    resolve_backbone_config_paths,
+    validate_run_id,
+    validate_protocol,
+)
 
 
 def _load_config(path: str = "configs/ensemble.yaml") -> Dict[str, object]:
@@ -89,6 +96,125 @@ def _load_aligned(
         expected_dataset_manifest_sha256=load_dataset_manifest_sha256(),
     )
     return artifacts
+
+
+def _approved_split_identity(
+    manifest_path: str,
+    split: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the immutable ordered IDs, labels, and class order for one split."""
+    with open(manifest_path, "r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    selected = [row for row in rows if row["split"] == split]
+    if not selected:
+        raise ValueError(f"Frozen dataset manifest has no rows for split {split!r}")
+    class_by_index: Dict[int, str] = {}
+    for row in rows:
+        index = int(row["class_index"])
+        name = row["class_name"]
+        previous = class_by_index.setdefault(index, name)
+        if previous != name:
+            raise ValueError(f"Frozen manifest class identity conflict at index {index}")
+    expected_indices = list(range(len(class_by_index)))
+    if sorted(class_by_index) != expected_indices:
+        raise ValueError("Frozen manifest class indices must be contiguous from zero")
+    return (
+        np.asarray([row["sample_id"] for row in selected], dtype=str),
+        np.asarray([int(row["class_index"]) for row in selected], dtype=np.int64),
+        np.asarray([class_by_index[index] for index in expected_indices], dtype=str),
+    )
+
+
+def validate_ensemble_fit_test_identity(
+    fit_artifacts: Sequence[PredictionArtifact],
+    test_artifacts: Sequence[PredictionArtifact],
+    *,
+    model_order: Sequence[str],
+    protocol: str,
+    run_id: str,
+    current_source_commit: str,
+    expected_config_sha256: Dict[str, str],
+    manifest_path: str = "artifacts/manifests/dataset_manifest.csv",
+    n_splits: int = 5,
+) -> None:
+    """Prove approved split membership and one model lineage before any fit."""
+    if len(fit_artifacts) != len(model_order) or len(test_artifacts) != len(model_order):
+        raise ValueError("Fit/test backbone count does not match canonical model order")
+    manifest_sha256 = sha256_file(manifest_path)
+    fit_manifest_split = "validation" if protocol == "single_split" else "train"
+    fit_ids, fit_labels, class_order = _approved_split_identity(
+        manifest_path, fit_manifest_split
+    )
+    test_ids, test_labels, test_class_order = _approved_split_identity(
+        manifest_path, "test"
+    )
+    if not np.array_equal(class_order, test_class_order):
+        raise ValueError("Frozen manifest class order differs across fit/test splits")
+    if set(fit_ids.tolist()).intersection(test_ids.tolist()):
+        raise ValueError("Frozen fit/test populations are not disjoint")
+
+    expected_fit_semantics = (
+        "single_checkpoint_inference"
+        if protocol == "single_split"
+        else "one_outer_holdout_checkpoint_per_training_row"
+    )
+    expected_test_semantics = (
+        "single_checkpoint_inference"
+        if protocol == "single_split"
+        else "mean_fold_probabilities"
+    )
+    expected_fold_keys = {f"fold_{index}" for index in range(1, n_splits + 1)}
+
+    for method, fit_artifact, test_artifact in zip(
+        model_order, fit_artifacts, test_artifacts
+    ):
+        for role, artifact, expected_ids, expected_labels, expected_semantics in (
+            ("fit", fit_artifact, fit_ids, fit_labels, expected_fit_semantics),
+            ("test", test_artifact, test_ids, test_labels, expected_test_semantics),
+        ):
+            artifact.validate()
+            if artifact.method != method:
+                raise ValueError(f"{role} method identity mismatch for {method}")
+            if artifact.run_id != run_id:
+                raise ValueError(f"{role} run identity mismatch for {method}")
+            if artifact.dataset_manifest_sha256 != manifest_sha256:
+                raise ValueError(f"{role} dataset identity mismatch for {method}")
+            if artifact.source_commit != current_source_commit:
+                raise ValueError(f"{role} source identity mismatch for {method}")
+            if artifact.config_sha256 != expected_config_sha256.get(method):
+                raise ValueError(f"{role} config identity mismatch for {method}")
+            if not np.array_equal(artifact.class_order, class_order):
+                raise ValueError(f"{role} class order mismatch for {method}")
+            if artifact.aggregation_semantics != expected_semantics:
+                raise ValueError(f"{role} aggregation semantics mismatch for {method}")
+            if not np.array_equal(artifact.sample_ids, expected_ids):
+                raise ValueError(f"{role} sample IDs do not match approved {fit_manifest_split if role == 'fit' else 'test'} rows for {method}")
+            if not np.array_equal(artifact.y_true, expected_labels):
+                raise ValueError(f"{role} labels do not match approved manifest for {method}")
+
+        if fit_artifact.config_sha256 != test_artifact.config_sha256:
+            raise ValueError(f"Fit/test config lineage mismatch for {method}")
+        if fit_artifact.source_commit != test_artifact.source_commit:
+            raise ValueError(f"Fit/test source lineage mismatch for {method}")
+        if fit_artifact.artifact_hashes != test_artifact.artifact_hashes:
+            raise ValueError(f"Fit/test checkpoint lineage mismatch for {method}")
+        if protocol == "single_split":
+            if set(fit_artifact.artifact_hashes) != {"checkpoint"}:
+                raise ValueError(f"Single-split checkpoint lineage is incomplete for {method}")
+        elif set(fit_artifact.artifact_hashes) != expected_fold_keys:
+            raise ValueError(f"OOF five-fold checkpoint lineage is incomplete for {method}")
+
+
+def _backbone_config_hashes(model_order: Sequence[str]) -> Dict[str, str]:
+    hashes: Dict[str, str] = {}
+    for config_path in resolve_backbone_config_paths():
+        model_name = load_experiment_config(config_path).model.name
+        if model_name in model_order:
+            hashes[model_name] = sha256_file(config_path)
+    missing = [name for name in model_order if name not in hashes]
+    if missing:
+        raise ValueError(f"Missing canonical backbone configs for {missing}")
+    return hashes
 
 
 def _save_method_prediction(
@@ -186,12 +312,15 @@ def run_ensemble_evaluation(
         test_paths, model_order, protocol=protocol, split="test", run_id=run_id
     )
     current_commit = require_git_commit()
-    if test_artifacts[0].source_commit != current_commit:
-        raise ValueError(
-            "Base prediction source_commit does not match the code executing the ensemble"
-        )
-    if not np.array_equal(fit_artifacts[0].class_order, test_artifacts[0].class_order):
-        raise ValueError("Fit/test class_order mismatch")
+    validate_ensemble_fit_test_identity(
+        fit_artifacts,
+        test_artifacts,
+        model_order=model_order,
+        protocol=protocol,
+        run_id=run_id,
+        current_source_commit=current_commit,
+        expected_config_sha256=_backbone_config_hashes(model_order),
+    )
 
     fit_probabilities = [artifact.probabilities for artifact in fit_artifacts]
     test_probabilities = [artifact.probabilities for artifact in test_artifacts]

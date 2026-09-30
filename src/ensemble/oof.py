@@ -45,7 +45,7 @@ from tqdm import tqdm
 from src.datasets.dataset import ImageFolderDataset
 from src.datasets.transforms import build_transforms
 from src.ensemble.artifacts import sample_ids_from_paths, save_prediction_artifact
-from src.engine.checkpoint import CheckpointManager
+from src.engine.checkpoint import CheckpointManager, scientific_checkpoint_provenance
 from src.models.factory import create_model
 from src.utils.config import load_config, load_dataset_config
 from src.utils.logger import CSVLogger, log_training_startup_banner, setup_logger
@@ -60,7 +60,13 @@ from src.utils.provenance import (
     write_json,
 )
 from src.utils.run_identity import validate_run_id
-from src.utils.reproducibility import get_generator, seed_worker, set_seed
+from src.utils.reproducibility import (
+    fold_seed,
+    get_generator,
+    seed_dataset_transform,
+    seed_worker,
+    set_seed,
+)
 from src.utils.visualization import (
     plot_confusion_matrix,
     plot_kfold_summary,
@@ -204,10 +210,12 @@ class OOFGenerator:
         test_prob_file = os.path.join(self.output_dir, "test_probabilities.npy")
         image_size = cfg.data.image_size
         train_transform = build_transforms(
-            cfg.augmentation.train, image_size=image_size, stage="train"
+            cfg.augmentation.train, image_size=image_size, stage="train",
+            seed=cfg.seed,
         )
         val_transform = build_transforms(
-            cfg.augmentation.val, image_size=image_size, stage="val"
+            cfg.augmentation.val, image_size=image_size, stage="val",
+            seed=cfg.seed,
         )
 
         full_train_dataset = ImageFolderDataset(
@@ -260,7 +268,8 @@ class OOFGenerator:
         test_sample_ids = None
         if os.path.isdir(test_dir):
             test_transform = build_transforms(
-                cfg.augmentation.test, image_size=image_size, stage="test"
+                cfg.augmentation.test, image_size=image_size, stage="test",
+                seed=cfg.seed,
             )
             test_dataset = ImageFolderDataset(
                 root=test_dir, transform=test_transform
@@ -390,7 +399,39 @@ class OOFGenerator:
             fold_metrics_path = os.path.join(fold_dir, "metrics.json")
             fold_ckpt_path = os.path.join(fold_dir, "best_model.pth")
 
-            set_seed(cfg.seed + fold_idx)
+            fold_provenance_identity = {
+                "fold": fold_num,
+                "n_splits": self.n_splits,
+                "split_seed": self.split_seed,
+                "train_indices_sha256": expected_cache_identity["folds"][str(fold_num)][
+                    "train_indices_sha256"
+                ],
+                "holdout_indices_sha256": expected_cache_identity["folds"][str(fold_num)][
+                    "holdout_indices_sha256"
+                ],
+            }
+            write_experiment_manifest(
+                os.path.join(fold_dir, "run_start_manifest.json"),
+                protocol="oof",
+                model=cfg.model.name,
+                fold=fold_num,
+                config_path=self.config_path,
+                seed=fold_seed(cfg.seed, fold_idx),
+                arguments={
+                    **fold_provenance_identity,
+                    "shuffle": True,
+                    "external_validation_directory": os.path.basename(validation_dirs[0]),
+                    "lifecycle": "STARTED",
+                },
+                run_id=self.run_id,
+            )
+
+            current_fold_seed = fold_seed(cfg.seed, fold_idx)
+            set_seed(current_fold_seed)
+            # Own the single-process augmentation stream at fold scope.  With
+            # workers, ``seed_worker`` replaces this with distinct seeds
+            # deterministically derived from the fold's DataLoader generator.
+            seed_dataset_transform(full_train_dataset, current_fold_seed)
 
             self._assert_fold_boundary(train_indices, outer_holdout_indices)
             train_subset = Subset(full_train_dataset, train_indices.tolist())
@@ -398,7 +439,7 @@ class OOFGenerator:
                 full_train_dataset_val, outer_holdout_indices.tolist()
             )
 
-            g = get_generator(cfg.seed + fold_idx)
+            g = get_generator(current_fold_seed)
 
             fold_train_loader = DataLoader(
                 train_subset,
@@ -431,6 +472,15 @@ class OOFGenerator:
                 external_val_loader=external_val_loader,
                 fold_idx=fold_idx,
                 fold_dir=fold_dir,
+                checkpoint_provenance=scientific_checkpoint_provenance(
+                    run_id=self.run_id,
+                    protocol="oof",
+                    backbone=cfg.model.name,
+                    dataset_manifest_sha256=dataset_manifest_sha256,
+                    source_commit=source_commit,
+                    effective_config_sha256=config_sha256,
+                    fold_identity=fold_provenance_identity,
+                ),
             )
 
             fold_probs, f_metrics = self._evaluate_outer_holdout(
@@ -453,7 +503,7 @@ class OOFGenerator:
                 model=cfg.model.name,
                 fold=fold_num,
                 config_path=self.config_path,
-                seed=cfg.seed + fold_idx,
+                seed=current_fold_seed,
                 checkpoint_path=os.path.join(fold_dir, "best_model.pth"),
                 prediction_path=os.path.join(
                     fold_dir, "outer_holdout_predictions.npz"
@@ -651,6 +701,7 @@ class OOFGenerator:
         external_val_loader: DataLoader,
         fold_idx: int,
         fold_dir: str,
+        checkpoint_provenance: Dict[str, Any],
     ) -> nn.Module:
         """Train one fold using only the fixed external validation split for selection.
 
@@ -676,6 +727,7 @@ class OOFGenerator:
             loss_gate_tolerance=getattr(
                 self.config.checkpoint, "loss_gate_tolerance", 0.05
             ),
+            provenance=checkpoint_provenance,
         )
 
         history: Dict[str, List[float]] = {

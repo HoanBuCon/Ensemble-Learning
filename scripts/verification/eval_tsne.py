@@ -63,7 +63,8 @@ def _penultimate_features(
     order = base_model_order()
     config = load_config("configs/swin_tiny.yaml")
     transform = build_transforms(
-        config.augmentation.test, image_size=config.data.image_size, stage="test"
+        config.augmentation.test, image_size=config.data.image_size, stage="test",
+        seed=config.seed,
     )
     dataset = ImageFolderDataset(root=os.path.join(config.data.root, "test"), transform=transform)
     loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=0)

@@ -25,12 +25,17 @@ if PROJECT_ROOT not in sys.path:
 import torch
 
 from src.datasets.dataset import create_dataloaders
-from src.engine.checkpoint import CheckpointManager
+from src.engine.checkpoint import CheckpointManager, scientific_checkpoint_provenance
 from src.engine.evaluator import evaluate_model
 from src.models.factory import create_model
 from src.utils.config import load_config
 from src.utils.reproducibility import set_seed
-from src.utils.provenance import load_dataset_manifest_sha256, require_git_commit, sha256_file
+from src.utils.provenance import (
+    load_dataset_manifest_sha256,
+    require_git_commit,
+    sha256_file,
+    verify_dataset_snapshot,
+)
 from src.utils.run_identity import model_run_root, validate_run_id
 
 
@@ -67,11 +72,20 @@ def evaluate(
     Returns:
         Metrics dictionary.
     """
-    require_git_commit()
+    source_commit = require_git_commit()
+    verify_dataset_snapshot()
     config = load_config(config_path)
     run_id = validate_run_id(run_id)
     output_dir = str(model_run_root(results_root, run_id, "single_split", config.model.name))
     set_seed(config.seed)
+    checkpoint_provenance = scientific_checkpoint_provenance(
+        run_id=run_id,
+        protocol="single_split",
+        backbone=config.model.name,
+        dataset_manifest_sha256=load_dataset_manifest_sha256(),
+        source_commit=source_commit,
+        effective_config_sha256=sha256_file(config_path),
+    )
 
     device = torch.device(config.device)
 
@@ -84,11 +98,19 @@ def evaluate(
 
     # Load checkpoint
     if checkpoint_path is None:
-        ckpt_manager = CheckpointManager(save_dir=output_dir)
+        ckpt_manager = CheckpointManager(
+            save_dir=output_dir,
+            provenance=checkpoint_provenance,
+        )
         ckpt = ckpt_manager.load_best(device=str(device))
         checkpoint_path = os.path.join(output_dir, "best_model.pth")
     else:
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        ckpt = CheckpointManager.load_scientific(
+            checkpoint_path,
+            checkpoint_provenance,
+            expected_role="best",
+            device=str(device),
+        )
 
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -116,7 +138,7 @@ def evaluate(
         run_id=run_id,
         dataset_manifest_sha256=load_dataset_manifest_sha256(),
         config_sha256=sha256_file(config_path),
-        source_commit=require_git_commit(),
+        source_commit=str(ckpt["checkpoint_provenance"]["source_commit"]),
         artifact_hashes={"checkpoint": sha256_file(checkpoint_path)},
         aggregation_semantics="single_checkpoint_inference",
     )

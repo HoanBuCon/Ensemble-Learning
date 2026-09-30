@@ -26,7 +26,11 @@ Usage::
     from src.utils.config import load_config
 
     config = load_config("configs/resnet50.yaml")
-    trainer = Trainer(config, run_id="paper-run", exact_save_dir="RESULTS/runs/paper-run/single_split/resnet50")
+    trainer = Trainer(
+        config, run_id="paper-run",
+        exact_save_dir="RESULTS/runs/paper-run/single_split/resnet50",
+        source_commit="<validated-full-git-sha>",
+    )
     results = trainer.train()
 """
 
@@ -46,7 +50,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.datasets.dataset import create_dataloaders
-from src.engine.checkpoint import CheckpointManager
+from src.engine.checkpoint import CheckpointManager, scientific_checkpoint_provenance
 from src.engine.evaluator import evaluate_model, run_inference, save_predictions
 from src.models.factory import create_model
 from src.utils.config import ExperimentConfig, load_config
@@ -88,6 +92,7 @@ class Trainer:
         *,
         run_id: str,
         exact_save_dir: str,
+        source_commit: str,
     ) -> None:
         if not isinstance(config, str):
             raise TypeError(
@@ -100,6 +105,12 @@ class Trainer:
         self.device = torch.device(config.device)
         self.is_resume = resume
         self.run_id = validate_run_id(run_id)
+        if len(source_commit) != 40 or any(
+            character not in "0123456789abcdef"
+            for character in source_commit.lower()
+        ):
+            raise ValueError("source_commit must be a full hexadecimal Git SHA")
+        self.source_commit = source_commit
         self.save_dir = str(
             prepare_exact_run_directory(Path(exact_save_dir), resume=self.is_resume)
         )
@@ -149,6 +160,14 @@ class Trainer:
             monitor=config.checkpoint.monitor,
             mode=config.checkpoint.mode,
             loss_gate_tolerance=loss_gate_tol,
+            provenance=scientific_checkpoint_provenance(
+                run_id=self.run_id,
+                protocol="single_split",
+                backbone=config.model.name,
+                dataset_manifest_sha256=load_dataset_manifest_sha256(),
+                source_commit=self.source_commit,
+                effective_config_sha256=sha256_file(self.config_path),
+            ),
         )
 
         # CSV logger
@@ -312,6 +331,14 @@ class Trainer:
             self.scaler.load_state_dict(scaler_state)
 
         last_epoch = ckpt.get("epoch", 0)
+        if self._early_stop_counter >= self.config.train.early_stopping_patience:
+            self.logger.info(
+                "Restored checkpoint already satisfies early stopping "
+                f"(counter={self._early_stop_counter}, "
+                f"patience={self.config.train.early_stopping_patience}); "
+                "no additional optimization epoch will run."
+            )
+            return self.config.train.epochs + 1
         start_epoch = last_epoch + 1
 
         self.logger.info(

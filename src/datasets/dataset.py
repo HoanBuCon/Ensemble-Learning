@@ -99,10 +99,12 @@ def create_dataloaders(
     image_size = config.data.image_size
 
     train_transform = build_transforms(
-        config.augmentation.train, image_size=image_size, stage="train"
+        config.augmentation.train, image_size=image_size, stage="train",
+        seed=config.seed,
     )
     val_transform = build_transforms(
-        config.augmentation.val, image_size=image_size, stage="val"
+        config.augmentation.val, image_size=image_size, stage="val",
+        seed=config.seed,
     )
 
     # Datasets
@@ -149,7 +151,8 @@ def create_dataloaders(
     test_dir = os.path.join(config.data.root, "test")
     if os.path.isdir(test_dir):
         test_transform = build_transforms(
-            config.augmentation.test, image_size=image_size, stage="test"
+            config.augmentation.test, image_size=image_size, stage="test",
+            seed=config.seed,
         )
         test_dataset = ImageFolderDataset(
             root=test_dir,

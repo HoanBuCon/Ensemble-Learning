@@ -19,9 +19,70 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import torch
+
+
+CHECKPOINT_PROVENANCE_FIELDS = (
+    "run_id",
+    "protocol",
+    "backbone",
+    "dataset_manifest_sha256",
+    "source_commit",
+    "effective_config_sha256",
+    "fold_identity",
+)
+
+
+def scientific_checkpoint_provenance(
+    *,
+    run_id: str,
+    protocol: str,
+    backbone: str,
+    dataset_manifest_sha256: str,
+    source_commit: str,
+    effective_config_sha256: str,
+    fold_identity: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the immutable origin shared by best/last scientific checkpoints."""
+    return {
+        "run_id": str(run_id),
+        "protocol": str(protocol),
+        "backbone": str(backbone),
+        "dataset_manifest_sha256": str(dataset_manifest_sha256),
+        "source_commit": str(source_commit),
+        "effective_config_sha256": str(effective_config_sha256),
+        "fold_identity": dict(fold_identity) if fold_identity is not None else None,
+    }
+
+
+def validate_checkpoint_provenance(
+    checkpoint: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    expected_role: str,
+) -> Dict[str, Any]:
+    """Fail closed unless a checkpoint has the exact scientific origin requested."""
+    actual = checkpoint.get("checkpoint_provenance")
+    if not isinstance(actual, dict):
+        raise ValueError("Scientific checkpoint is missing required checkpoint_provenance")
+    for field in CHECKPOINT_PROVENANCE_FIELDS:
+        if field not in actual:
+            raise ValueError(f"Checkpoint provenance missing field: {field}")
+        if field not in expected:
+            raise ValueError(f"Expected checkpoint provenance missing field: {field}")
+        if actual[field] != expected[field]:
+            raise ValueError(
+                f"Checkpoint provenance mismatch at {field}: "
+                f"actual={actual[field]!r}, expected={expected[field]!r}"
+            )
+    if actual.get("checkpoint_role") != expected_role:
+        raise ValueError(
+            "Checkpoint provenance mismatch at checkpoint_role: "
+            f"actual={actual.get('checkpoint_role')!r}, expected={expected_role!r}"
+        )
+    return dict(actual)
 
 
 class CheckpointManager:
@@ -43,11 +104,22 @@ class CheckpointManager:
         monitor: str = "val_accuracy",
         mode: str = "max",
         loss_gate_tolerance: float = 0.05,
+        provenance: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.save_dir = save_dir
         self.monitor = monitor
         self.mode = mode
         self.loss_gate_tolerance = loss_gate_tolerance
+        self.provenance = dict(provenance) if provenance is not None else None
+        if self.provenance is not None:
+            missing = [
+                field for field in CHECKPOINT_PROVENANCE_FIELDS
+                if field not in self.provenance
+            ]
+            if missing:
+                raise ValueError(
+                    f"Checkpoint provenance missing required fields: {missing}"
+                )
         self.min_val_loss: float = float("inf")
         self.best_val_loss: float = float("inf")
         self.best_epoch: Optional[int] = None
@@ -74,6 +146,7 @@ class CheckpointManager:
         history: Optional[Dict[str, Any]] = None,
         scaler: Optional[Any] = None,
         early_stop_counter: int = 0,
+        checkpoint_role: str = "last",
     ) -> Dict[str, Any]:
         """Build a serializable state dictionary."""
         state: Dict[str, Any] = {
@@ -100,6 +173,11 @@ class CheckpointManager:
             state["metrics"] = metrics
         if history is not None:
             state["history"] = history
+        if self.provenance is not None:
+            state["checkpoint_provenance"] = {
+                **self.provenance,
+                "checkpoint_role": checkpoint_role,
+            }
         return state
 
     def save_if_best(
@@ -143,7 +221,7 @@ class CheckpointManager:
                 self.best_val_loss = float(metrics["val_loss"])
             state = self._build_state(
                 model, optimizer, scheduler, epoch, metrics, history,
-                scaler, early_stop_counter,
+                scaler, early_stop_counter, "best",
             )
             path = os.path.join(self.save_dir, "best_model.pth")
             torch.save(state, path)
@@ -164,7 +242,7 @@ class CheckpointManager:
         """Save the most recent checkpoint (overwritten every epoch)."""
         state = self._build_state(
             model, optimizer, scheduler, epoch, metrics, history,
-            scaler, early_stop_counter,
+            scaler, early_stop_counter, "last",
         )
         path = os.path.join(self.save_dir, "last_model.pth")
         torch.save(state, path)
@@ -184,12 +262,37 @@ class CheckpointManager:
     def load_best(self, device: str = "cpu") -> Dict[str, Any]:
         """Load the exact requested best checkpoint or fail explicitly."""
         primary_path = os.path.join(self.save_dir, "best_model.pth")
-        return self._load(primary_path, device)
+        state = self._load(primary_path, device)
+        if self.provenance is not None:
+            validate_checkpoint_provenance(
+                state, self.provenance, expected_role="best"
+            )
+        return state
 
     def load_last(self, device: str = "cpu") -> Dict[str, Any]:
         """Load the exact requested last checkpoint or fail explicitly."""
         primary_path = os.path.join(self.save_dir, "last_model.pth")
-        return self._load(primary_path, device)
+        state = self._load(primary_path, device)
+        if self.provenance is not None:
+            validate_checkpoint_provenance(
+                state, self.provenance, expected_role="last"
+            )
+        return state
+
+    @staticmethod
+    def load_scientific(
+        path: str,
+        expected_provenance: Mapping[str, Any],
+        *,
+        expected_role: str,
+        device: str = "cpu",
+    ) -> Dict[str, Any]:
+        """Load an explicitly selected scientific checkpoint and verify origin."""
+        state = CheckpointManager._load(path, device)
+        validate_checkpoint_provenance(
+            state, expected_provenance, expected_role=expected_role
+        )
+        return state
 
     def restore_tracking(self, state: Dict[str, Any]) -> None:
         """Restore checkpoint-selection state from a persisted checkpoint."""

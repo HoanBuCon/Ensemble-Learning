@@ -17,7 +17,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -29,6 +29,7 @@ def build_transforms(
     aug_config: AugmentStageConfig,
     image_size: int = 224,
     stage: str = "train",
+    seed: Optional[int] = None,
 ) -> A.Compose:
     """
     Build an Albumentations ``Compose`` pipeline from config.
@@ -37,6 +38,9 @@ def build_transforms(
         aug_config: Augmentation parameters for this stage.
         image_size: Target image size (height = width).
         stage: One of ``'train'``, ``'val'``, ``'test'``.
+        seed: Owner seed for Albumentations' independent random generator.
+              DataLoader workers replace this with their deterministic worker
+              seed when multiprocessing is active.
 
     Returns:
         An :class:`albumentations.Compose` instance.
@@ -112,4 +116,4 @@ def build_transforms(
     # Convert to tensor (always last)
     transforms.append(ToTensorV2())
 
-    return A.Compose(transforms)
+    return A.Compose(transforms, seed=seed)

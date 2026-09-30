@@ -384,7 +384,7 @@ class Step4BRemediationTests(unittest.TestCase):
             trainer = Trainer.__new__(Trainer)
             trainer.config = SimpleNamespace(
                 checkpoint=SimpleNamespace(save_dir=directory, monitor="val_accuracy"),
-                train=SimpleNamespace(epochs=30),
+                train=SimpleNamespace(epochs=30, early_stopping_patience=6),
                 experiment_name="resume-test",
             )
             trainer.device = torch.device("cpu")

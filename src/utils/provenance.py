@@ -210,28 +210,51 @@ def _package_version(distribution: str) -> Optional[str]:
 
 
 def git_identity(project_root: os.PathLike[str] | str = ".") -> Dict[str, Any]:
-    def run(*args: str) -> Optional[str]:
+    def run(*args: str, preserve_leading_whitespace: bool = False) -> Optional[str]:
         try:
-            return subprocess.check_output(
+            output = subprocess.check_output(
                 ["git", *args], cwd=project_root, text=True, stderr=subprocess.DEVNULL,
-            ).strip()
+            )
+            # Porcelain's first two columns are data.  Calling ``strip()`` on
+            # the whole output turns a first-line `` M path`` into ``M path``
+            # and shifts the pathname.  Only remove record terminators here.
+            return (
+                output.rstrip("\r\n")
+                if preserve_leading_whitespace
+                else output.strip()
+            )
         except (OSError, subprocess.CalledProcessError):
             return None
 
-    status = run("status", "--porcelain", "--untracked-files=all")
-    scientific_changes: List[str] = []
-    if status:
-        for line in status.splitlines():
-            candidate = line[3:].split(" -> ")[-1].replace("\\", "/")
-            if candidate in {"main.py", "server.py", "requirements.txt"} or candidate.startswith(
-                ("configs/", "scripts/", "src/")
-            ):
-                scientific_changes.append(candidate)
+    status = run(
+        "status", "--porcelain", "--untracked-files=all",
+        preserve_leading_whitespace=True,
+    )
+    scientific_changes = _scientific_changes_from_porcelain(status or "")
     return {
         "git_commit": run("rev-parse", "HEAD"),
         "git_branch": run("branch", "--show-current"),
         "scientific_worktree_changes": scientific_changes,
     }
+
+
+def _scientific_changes_from_porcelain(status: str) -> List[str]:
+    """Extract dirty scientific paths without altering porcelain status columns."""
+    scientific_changes: List[str] = []
+    for line in status.splitlines():
+        if not line:
+            continue
+        if len(line) < 4 or line[2] != " ":
+            raise RuntimeError(f"Malformed git status --porcelain record: {line!r}")
+        # For renames/copies, both the source and destination can be relevant.
+        candidates = line[3:].split(" -> ")
+        for candidate in candidates:
+            normalized = candidate.strip('"').replace("\\", "/")
+            if normalized in {"main.py", "server.py", "requirements.txt"} or normalized.startswith(
+                ("configs/", "scripts/", "src/")
+            ):
+                scientific_changes.append(normalized)
+    return list(dict.fromkeys(scientific_changes))
 
 
 def require_git_commit(project_root: os.PathLike[str] | str = ".") -> str:
@@ -339,4 +362,37 @@ def write_experiment_manifest(
         "prediction_sha256": sha256_file(prediction) if prediction and prediction.is_file() else None,
     }
     write_json(output_path, payload)
+    return payload
+
+
+def validate_run_start_manifest(
+    path: os.PathLike[str] | str,
+    *,
+    run_id: str,
+    protocol: str,
+    model: str,
+    config_sha256: str,
+    dataset_manifest_sha256: str,
+    source_commit: str,
+) -> Dict[str, Any]:
+    """Validate immutable run-start identity before resuming optimization."""
+    target = Path(path)
+    if not target.is_file():
+        raise FileNotFoundError(f"Scientific resume requires run-start manifest: {target}")
+    with target.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    expected = {
+        "run_id": run_id,
+        "protocol": protocol,
+        "model": model,
+        "config_sha256": config_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "git_commit": source_commit,
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ValueError(
+                f"Run-start provenance mismatch at {field}: "
+                f"actual={payload.get(field)!r}, expected={value!r}"
+            )
     return payload
