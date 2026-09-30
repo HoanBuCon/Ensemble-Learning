@@ -164,6 +164,31 @@ def save_prediction_artifact(
     return sha256_file(target)
 
 
+def _validate_raw_class_indices(
+    values: np.ndarray,
+    *,
+    field_name: str,
+    n_classes: int,
+) -> None:
+    """Reject malformed serialized class-index arrays before any cast.
+
+    Artifact loaders are a scientific trust boundary.  In particular, casting
+    a floating array such as ``[0.9, 1.9]`` to ``int64`` before validation
+    silently changes the labels.  Persisted class indices therefore must be
+    one-dimensional integer arrays; booleans, floating point, strings and
+    object arrays are not valid encodings.
+    """
+    if values.ndim != 1:
+        raise ValueError(f"{field_name} must be a one-dimensional integer array")
+    if not np.issubdtype(values.dtype, np.integer):
+        raise ValueError(
+            f"{field_name} must use an integer dtype; fractional/non-integer "
+            "serialized class indices are not accepted"
+        )
+    if np.any(values < 0) or np.any(values >= n_classes):
+        raise ValueError(f"{field_name} contains an out-of-range class index")
+
+
 def load_prediction_artifact(path: str) -> PredictionArtifact:
     target = Path(path)
     if not target.is_file():
@@ -178,12 +203,25 @@ def load_prediction_artifact(path: str) -> PredictionArtifact:
         missing = required.difference(data.files)
         if missing:
             raise ValueError(f"Prediction artifact missing fields {sorted(missing)}: {target}")
+        raw_y_true = data["y_true"]
+        raw_predictions = data["predictions"]
+        raw_class_order = data["class_order"]
+        _validate_raw_class_indices(
+            raw_y_true,
+            field_name="y_true",
+            n_classes=len(raw_class_order),
+        )
+        _validate_raw_class_indices(
+            raw_predictions,
+            field_name="predictions",
+            n_classes=len(raw_class_order),
+        )
         artifact = PredictionArtifact(
             sample_ids=data["sample_ids"].astype(str),
-            y_true=data["y_true"].astype(np.int64),
+            y_true=raw_y_true.astype(np.int64),
             probabilities=data["probabilities"].astype(np.float64),
-            predictions=data["predictions"].astype(np.int64),
-            class_order=data["class_order"].astype(str),
+            predictions=raw_predictions.astype(np.int64),
+            class_order=raw_class_order.astype(str),
             protocol=str(data["protocol"].item()),
             method=str(data["method"].item()),
             split=str(data["split"].item()),

@@ -22,7 +22,7 @@ from src.engine.checkpoint import (
     scientific_checkpoint_provenance,
 )
 from src.engine.trainer import Trainer
-from src.ensemble.artifacts import PredictionArtifact
+from src.ensemble.artifacts import PredictionArtifact, load_prediction_artifact
 from src.utils.config import load_config
 from src.utils.provenance import (
     _scientific_changes_from_porcelain,
@@ -395,6 +395,52 @@ class FinalBlockerRemediationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             trainer = self._resume_trainer(directory, counter=5, patience=6)
             self.assertEqual(trainer._restore_checkpoint(), 9)
+
+    def test_f06_loader_rejects_raw_non_integer_class_indices(self) -> None:
+        """Serialized labels must be validated before int64 conversion."""
+        def write_artifact(path: Path, y_true: np.ndarray, predictions: np.ndarray) -> None:
+            np.savez_compressed(
+                path,
+                sample_ids=np.asarray(["sample-a", "sample-b"]),
+                y_true=y_true,
+                probabilities=np.asarray([[0.9, 0.1], [0.1, 0.9]]),
+                predictions=predictions,
+                class_order=np.asarray(["a", "b"]),
+                protocol=np.asarray("single_split"),
+                method=np.asarray("resnet50"),
+                split=np.asarray("test"),
+                run_id=np.asarray("run-a"),
+                dataset_manifest_sha256=np.asarray("a" * 64),
+                config_sha256=np.asarray("b" * 64),
+                source_commit=np.asarray("c" * 40),
+                artifact_hashes_json=np.asarray(json.dumps({"checkpoint": "d" * 64})),
+                aggregation_semantics=np.asarray("single_checkpoint_inference"),
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.npz"
+            write_artifact(
+                path,
+                np.asarray([0, 1], dtype=np.int32),
+                np.asarray([0, 1], dtype=np.int32),
+            )
+            loaded = load_prediction_artifact(str(path))
+            self.assertEqual(loaded.y_true.dtype, np.dtype(np.int64))
+            self.assertEqual(loaded.predictions.dtype, np.dtype(np.int64))
+
+            invalid_cases = (
+                ("fractional_y", np.asarray([0.5, 1.0]), np.asarray([0, 1])),
+                ("fractional_prediction", np.asarray([0, 1]), np.asarray([0.0, 1.5])),
+                ("integral_float_dtype", np.asarray([0.0, 1.0]), np.asarray([0, 1])),
+                ("boolean_y", np.asarray([False, True]), np.asarray([0, 1])),
+                ("string_prediction", np.asarray([0, 1]), np.asarray(["0", "1"])),
+                ("out_of_range", np.asarray([0, 1]), np.asarray([0, 2])),
+            )
+            for name, y_true, predictions in invalid_cases:
+                with self.subTest(name=name):
+                    write_artifact(path, y_true, predictions)
+                    with self.assertRaises(ValueError):
+                        load_prediction_artifact(str(path))
 
 
 if __name__ == "__main__":
